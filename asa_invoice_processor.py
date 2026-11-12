@@ -213,7 +213,10 @@ def extract_invoice(text: str) -> dict:
     po_number = extract_reference(lines, r"^(?:cust(?:omer)?\.?\s*p\.?o\.?|p\.?\s*o\.?|purchase\s*order)(?:\s*(?:number|no\.?|#))?\b")
     delivery_number = extract_reference(lines, r"^(?:delivery|challan)\s*(?:number|no\.?|#)\b")
     customer_order_number = extract_reference(lines, r"^customer\s*order\s*(?:number|no\.?|#)\b")
-    vendor = label_value(r"trade\s*/?\s*legal\s*name|vendor|supplier|from") or label_value(r"name")
+    # OCR occasionally inserts a space within a printed label (for example "Ve ndor").
+    # Accept that narrow variation only when it is a line-leading field label.
+    vendor_label = r"trade\s*/?\s*legal\s*name|ve\s*ndor|supplier|from"
+    vendor = label_value(vendor_label) or label_value(r"name")
     if vendor and re.search(r"gst|pan|tax|reg\.?\s*no", vendor, re.I):
         vendor = next((line for line in lines[lines.index(vendor) + 1:] if not re.search(r"gst|pan|tax|reg\.?\s*no", line, re.I)), vendor) if vendor in lines else vendor
     if not vendor:
@@ -306,7 +309,7 @@ def extract_invoice(text: str) -> dict:
     }
     def field_evidence(key, value):
         labels = {"invoice_number": r"\binv(?:oice)?\s*(?:no\.?|number|#)", "po_number": r"\b(?:p\.?o\.?|purchase\s*order|cust\.?\s*po)\b",
-                  "vendor": r"\b(?:vendor|supplier|trade\s*/?\s*legal\s*name|from)\b",
+                  "vendor": r"\b(?:ve\s*ndor|supplier|trade\s*/?\s*legal\s*name|from)\b",
                   "gstin": r"\b(?:gstin|gst\s*reg\.?\s*no)\b", "date": r"\b(?:invoice\s*date|inv\.?\s*date)\b",
                   "total": r"\b(?:grand\s*total|invoice\s*total|amount\s*due|total\s*amount)\b",
                   "subtotal": r"\b(?:subtotal|sub\s*-\s*total|taxable\s*value)\b", "tax": r"\b(?:total\s*tax|total\s*gst|tax\s*amount|tax)\b"}

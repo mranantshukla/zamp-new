@@ -140,6 +140,12 @@ def test_image_pipeline_and_ocr_failure():
             processor.read_document(b"image", ".jpg")
 
 
+def test_ocr_spaced_vendor_label_has_direct_evidence():
+    inv = processor.extract_invoice("FICTIONAL DEMO DOCUMENT\nTAX INVOICE\nVe ndor. Acme Supplies\nInvoice Number: INV-1")
+    assert inv["vendor"] == "Acme Supplies"
+    assert inv["field_metadata"]["vendor"]["reliability"] == "DIRECT_LABEL"
+
+
 def test_seller_and_buyer_gstin_separate():
     seller, buyer = gstin(), gstin("27ABCDE1234F1Z")
     text = f"Vendor: Acme Supplies\nGSTIN: {seller}\nBill To GSTIN: {buyer}\nInvoice Number: INV-1\nPO Number: PO-1\nTotal: 1000"

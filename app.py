@@ -15,6 +15,7 @@ from werkzeug.utils import secure_filename
 import storage
 from asa_invoice_processor import classify_document, extract_invoice, read_document
 from asa_dashboard import dataset_rows, dataset_image_bytes, evaluate_dataset
+from ai_review import review_invoice
 
 ROOT = Path(__file__).parent
 app = Flask(__name__)
@@ -31,7 +32,7 @@ storage.recover_interrupted()
 
 STAGE_NAMES = ["Document received", "PDF text / OCR", "Document classification", "Field extraction",
                "Extraction validation", "Vendor verification", "PO matching", "Financial validation",
-               "Duplicate detection", "AP decision", "History persistence"]
+               "Duplicate detection", "AP decision", "AI evidence review", "History persistence"]
 
 def logged_in():
     return not os.getenv("DEMO_USERNAME") or session.get("authenticated") is True
@@ -102,9 +103,15 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         current = "Financial validation"; stage(rid, current, "RUNNING")
         current = "Duplicate detection"; stage(rid, current, "RUNNING")
         current = "AP decision"; stage(rid, current, "RUNNING")
+        current = "AI evidence review"; stage(rid, current, "RUNNING")
         current = "History persistence"; stage(rid, current, "RUNNING")
         # Benchmark labels enter only after extraction and the AP decision.
         decision = storage.locked_decision(rid, invoice, ROOT / "samples" / "pos.csv", method)
+        ai_review = review_invoice(invoice, decision)
+        stage(rid, "AI evidence review", "COMPLETED", ai_review["recommendation"])
+        storage.finish_run(rid, {**{k:v for k,v in storage.get_run(rid).items()
+                                    if k not in ("run_id", "time", "created_at", "document_id", "source", "event_type", "status", "stages", "reviews")},
+                                 "ai_review": ai_review}, decision.status)
         checks = {c["check"]: c for c in decision.checks}
         stage(rid, "Vendor verification", "COMPLETED" if checks.get("vendor_master", {}).get("passed") else "BLOCKED",
               checks.get("vendor_master", {}).get("detail", "Vendor unverified"))
@@ -234,10 +241,13 @@ def review_api(rid):
 def index():
     if "csrf" not in session: session["csrf"] = os.urandom(24).hex()
     samples = [(i, f"Indian GST invoice {i+1:02d}") for i, _ in enumerate(dataset_rows())]
-    css = (ROOT / "dashboard.css").read_text(encoding="utf-8")
+    css_path = ROOT / "dashboard.css"
+    if not css_path.exists(): css_path = Path(__file__).parent / "dashboard.css"
+    css = css_path.read_text(encoding="utf-8")
     html = render_template_string(INDEX_HTML, csrf=session["csrf"], samples=samples, css=css)
     review_markup = "<section class='card' id='reviewqueue'><div class='section-heading'><div><span class='eyebrow'>WORK QUEUE</span><h2>Review queue</h2></div><span class='muted'>Human attention required</span></div><div id='reviewrows' class='timeline'><p class='muted'>No invoices currently require review.</p></div></section>"
     html = html.replace("<section class='card' id='history'>", review_markup + "<section class='card' id='history'>", 1)
+    html = html.replace("<div id='reason'></div>", "<div id='reason'></div><section class='ai-review'><span class='eyebrow'>AI EVIDENCE REVIEW</span><div id='aiprofile' class='muted'>Waiting for automated evidence review.</div></section>", 1)
     sidebar = """<aside class='side'><div class='logo'>Z</div><nav class='app-nav' aria-label='Main navigation'><a href='#home'><span>⌂</span>Home</a><a href='#history'><span>▤</span>My invoices</a><a href='#upload'><span>⌁</span>Scan &amp; upload</a><a href='#reviewqueue'><span>!</span>Review centre</a><a href='#history'><span>◷</span>Reports</a></nav></aside>"""
     html = html.replace("<aside class='side'><div class='logo'>Z</div><a href='#upload'>◇</a><a href='#history'>◷</a></aside>", sidebar, 1)
     html = html.replace("<main class='content'>", "<main class='content' id='home'>", 1)
@@ -251,7 +261,14 @@ def index():
     .grid{display:grid;grid-template-columns:minmax(300px,.9fr) minmax(330px,1.1fr);gap:18px;margin:0}.card{background:#fff;border:1px solid #e6e7f2;border-radius:20px;padding:23px;box-shadow:0 5px 25px #30386208;margin-bottom:18px}.card h2{font-size:20px;letter-spacing:-.6px}.button{border-radius:11px;background:#5142b8;color:#fff;padding:12px 15px;transition:transform .16s,background .16s}.button:hover{background:#4235a0;transform:translateY(-1px)}.activity{background:#201e4c!important;border-radius:14px!important;padding:18px!important;color:#f2f1ff!important}.tablewrap{overflow-x:auto}.tablewrap table{min-width:100%}.badge.APPROVED{background:#e9f8ef;color:#14714b}.badge.REJECTED,.badge.FAILED{background:#ffe9ed;color:#b32643}.badge.PENDING_REVIEW{background:#fff3d6;color:#8a620e}.preview{transition:transform .2s}.is-scanning .preview{animation:scanPulse 1.2s ease-in-out infinite}@keyframes scanPulse{50%{box-shadow:0 0 0 4px #8d7cff33}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
     @media(max-width:1000px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:740px){.shell{display:block}.side{height:auto;position:static;flex-direction:row;align-items:center;padding:10px 16px;gap:10px}.app-nav{display:flex;overflow:auto;margin:0}.side .app-nav a{white-space:nowrap;padding:8px}.side .app-nav a span{display:none}.content{padding:16px 14px 60px}.grid,.cols{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.card{padding:18px}}
     """
-    return html.replace("</head>", "<style>" + ui_overrides + "</style></head>", 1)
+    ai_ui = """<script>(() => { const original = window.renderRun; if (!original) return;
+    window.renderRun = function(run) { original(run); const target = document.getElementById('aiprofile');
+      if (!target) return; const review = run.ai_review; if (!review) { target.textContent = 'No AI evidence review is available for this historical run.'; return; }
+      const flags = (review.flagged_checks || []).map(flag => `${flag.check}: ${flag.outcome}`).join(' · ');
+      target.innerHTML = `<b>${esc(review.recommendation)}</b><p>${esc(review.summary)}</p>${flags ? `<small>${esc(flags)}</small>` : ''}`;
+    }; })();</script>"""
+    html = html.replace("</head>", "<style>" + ui_overrides + "</style></head>", 1)
+    return html.replace("</body>", ai_ui + "</body>", 1)
 
 LOGIN_HTML = """<!doctype html><title>Sign in · ASA</title><main style='font:16px Arial;max-width:360px;margin:15vh auto'><h1>Invoice intelligence</h1><p>Sign in to view invoice records.</p><form method=post><input name=username placeholder=Username required><input name=password type=password placeholder=Password required><button>Sign in</button></form><p>{{error}}</p></main>"""
 INDEX_HTML = """<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>ASA Invoice Intelligence</title><style>{{ css }}</style><style>

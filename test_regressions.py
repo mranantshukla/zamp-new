@@ -158,6 +158,23 @@ def test_ocr_spaced_vendor_label_has_direct_evidence():
     assert inv["field_metadata"]["vendor"]["reliability"] == "DIRECT_LABEL"
 
 
+def test_extended_extraction_schema_uses_document_labels_only():
+    inv = processor.extract_invoice("""TAX INVOICE
+Invoice Number: INV-9
+PO Number: PO-1
+PO Date: 2026-11-01
+Invoice Date: 2026-11-02
+Taxable Value: 100.00
+Description of Goods
+Cable HSN: 8544 Qty: 2 Rate: 50.00
+Grand Total: 118.00""")
+    assert inv["details"]["po_date"] == "2026-11-01"
+    assert inv["details"]["taxable_amount"] == 100.0
+    assert inv["line_items"][0]["hsn_sac"] == "8544"
+    assert inv["line_items"][0]["quantity"] == 2.0
+    assert inv["line_items"][0]["unit_price"] == 50.0
+
+
 def test_seller_and_buyer_gstin_separate():
     seller, buyer = gstin(), gstin("27ABCDE1234F1Z")
     text = f"Vendor: Acme Supplies\nGSTIN: {seller}\nBill To GSTIN: {buyer}\nInvoice Number: INV-1\nPO Number: PO-1\nTotal: 1000"

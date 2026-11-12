@@ -304,6 +304,7 @@ def extract_invoice(text: str) -> dict:
     identity_ambiguous = len(set(seller_gstins)) > 1 or (len(set(gstins)) > 1 and not seller_gstins)
     invoice_date = dated(label_value(r"invoice\s*date|inv\.?\s*date|date"))
     due_date = dated(label_value(r"due\s*date|payment\s*due"))
+    po_date = dated(label_value(r"(?:p\.?o\.?|purchase\s*order)\s*date"))
     order_number = label_value(r"order\s*(?:number|no\.?)")
     customer_number = label_value(r"customer\s*(?:number|no\.?)")
     payment_terms = label_value(r"payment\s*terms|terms\s*of\s*payment")
@@ -353,20 +354,27 @@ def extract_invoice(text: str) -> dict:
         for line in lines[header_index + 1:]:
             if re.search(r"^(sub\s*-?total|grand\s*total|total\s*gst|total\s*tax|terms|bank\s*details)", line, re.I): break
             if len(line) > 2 and not re.fullmatch(r"[0-9 .,%/-]+", line) and not re.fullmatch(r"(?:hsn|rate|dsc\s*%|price|qty|quantity|net\s*amt|gst\s*%|amount|description|particulars?)", line, re.I):
-                line_items.append({"description": line})
+                item = {"description": line}
+                hsn = re.search(r"\b(?:HSN|SAC)\s*[:#-]?\s*(\d{4,8})\b", line, re.I)
+                if hsn: item["hsn_sac"] = hsn.group(1)
+                quantity = re.search(r"\b(?:qty|quantity)\s*[:#-]?\s*(\d+(?:\.\d+)?)\b", line, re.I)
+                if quantity: item["quantity"] = float(quantity.group(1))
+                unit_price = re.search(r"\b(?:rate|unit\s*price|price)\s*[:#-]?\s*([0-9][0-9,]*(?:\.\d{1,2})?)", line, re.I)
+                if unit_price: item["unit_price"] = money(unit_price.group(1))
+                line_items.append(item)
         line_items = line_items[:20]
 
     details = {
         "seller": vendor, "buyer": buyer, "buyer_gstin": buyer_gstin,
         "identity_ambiguous": identity_ambiguous,
         "billing_address": billing_address, "shipping_address": shipping_address,
-        "invoice_date": invoice_date, "due_date": due_date, "order_number": order_number,
+        "invoice_date": invoice_date, "due_date": due_date, "po_date": po_date, "order_number": order_number,
         "customer_order_number": customer_order_number, "delivery_number": delivery_number,
         "customer_number": customer_number, "payment_terms": payment_terms,
         "place_of_supply": place_of_supply, "tax_type": tax_type, "salesperson": salesperson,
         "pan": pan, "phone": phone, "email": email, "reverse_charge": reverse_charge,
         "bank_name": bank_name, "account_last4": account[-4:] if account else None, "ifsc": ifsc,
-        "rounded_off": money(rounded_off_raw), "tax_breakdown": tax_breakdown,
+        "rounded_off": money(rounded_off_raw), "taxable_amount": money(subtotal_raw), "tax_breakdown": tax_breakdown,
     }
     def field_evidence(key, value):
         labels = {"invoice_number": r"\binv(?:oice)?\s*(?:no\.?|number|#)", "po_number": r"\b(?:p\.?o\.?|purchase\s*order|cust\.?\s*po)\b",

@@ -136,6 +136,19 @@ def test_manual_review_preserves_automated_decision(client):
     assert json.loads(saved["reviews"][0]["corrections"])["po_number"] == "PO-1"
 
 
+def test_ai_evidence_review_is_recorded_without_overriding_decision(client):
+    approved = submit(client, pdf(invoice_text(number="AI-OK")))
+    assert approved["status"] == "APPROVED"
+    review = approved["ai_review"]
+    assert review["recommendation"] == "AUTO_APPROVE"
+    assert review["decision_preserved"] == "APPROVED"
+    assert any(stage["stage"] == "AI evidence review" and stage["status"] == "COMPLETED"
+               for stage in approved["stages"])
+    pending = submit(client, pdf(invoice_text(number="AI-NEEDS-REVIEW", po="")))
+    assert pending["status"] == "PENDING_REVIEW"
+    assert pending["ai_review"]["recommendation"] == "ESCALATE_TO_HUMAN"
+
+
 def test_concurrent_duplicate_decision(client):
     raw=pdf(invoice_text(number="RACE-1"))
     with ThreadPoolExecutor(max_workers=2) as executor:

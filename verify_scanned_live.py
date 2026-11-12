@@ -20,8 +20,15 @@ with file.open("rb") as stream:
 assert r.status_code == 202, (r.status_code,r.text[:100])
 rid = r.json()["run_id"]
 for _ in range(180):
-    r = s.get(base + "/api/runs/" + rid, timeout=90)
-    assert r.status_code == 200
+    try:
+        r = s.get(base + "/api/runs/" + rid, timeout=90)
+    except requests.RequestException:
+        time.sleep(1)
+        continue
+    if r.status_code in (502, 503, 504):
+        time.sleep(1)
+        continue
+    assert r.status_code == 200, (r.status_code, r.text[:100])
     row = r.json()
     if row["status"] != "RUNNING": break
     time.sleep(1)

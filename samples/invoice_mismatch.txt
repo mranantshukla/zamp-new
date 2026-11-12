@@ -1,0 +1,5 @@
+Vendor: Northwind Logistics
+Invoice Number: INV-002
+Invoice Date: 2026-11-10
+PO Number: PO-1002
+Total: 1700.00

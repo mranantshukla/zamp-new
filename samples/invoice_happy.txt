@@ -1,0 +1,6 @@
+Vendor: Acme Supplies
+Invoice Number: INV-001
+Invoice Date: 2026-11-10
+PO Number: PO-1001
+Tax: 180.00
+Total: 1000.00

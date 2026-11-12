@@ -1,0 +1,3 @@
+Vendor: Globex Services
+Invoice Number: INV-003
+Total: 800.00

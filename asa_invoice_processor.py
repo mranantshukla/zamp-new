@@ -5,7 +5,7 @@ Usage:
   python asa_invoice_processor.py --invoice samples/invoice_duplicate.txt --po-data samples/pos.csv --history samples/history.json
 """
 from __future__ import annotations
-import argparse, csv, json, re, threading
+import argparse, csv, json, os, re, threading
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +32,12 @@ except Exception:
 MONEY = r"(?:[$₹€£]\s*)?([0-9][0-9, ]*(?:\.\d{2})?)"
 OCR_LOCK = threading.Lock()
 OCR_ENGINE = None
+# Render's shared CPU is much slower than a development workstation.  200 DPI
+# keeps invoice labels readable while avoiding the 2.25x pixel cost of 300 DPI.
+OCR_PDF_DPI = max(150, min(300, int(os.getenv("OCR_PDF_DPI", "200"))))
+# A second full OCR pass is valuable for forensic/local testing but expensive.
+# It is opt-in in deployment and only runs for low-contrast images.
+OCR_ENHANCED_PASS = os.getenv("OCR_ENHANCED_PASS", "").lower() in ("1", "true", "yes")
 
 @dataclass
 class Decision:
@@ -140,6 +146,8 @@ def _ocr_once(data: bytes) -> str:
 
 def _ocr_image(data):
     original = _ocr_once(data)
+    if not OCR_ENHANCED_PASS:
+        return original
     enhanced = _enhanced_ocr_candidate(data)
     if not enhanced:
         return original
@@ -166,9 +174,7 @@ def read_document(data: bytes, suffix: str):
                 raise RuntimeError("Scanned PDF rendering requires PyMuPDF")
             with fitz.open(stream=data, filetype="pdf") as document:
                 for i in scanned:
-                    # 300 DPI preserves small invoice text; preprocessing only
-                    # runs after OCR comparison proves it is helpful.
-                    pix = document[i].get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72), alpha=False)
+                    pix = document[i].get_pixmap(matrix=fitz.Matrix(OCR_PDF_DPI / 72, OCR_PDF_DPI / 72), alpha=False)
                     text_parts[i] = _ocr_image(pix.tobytes("png"))
         return "\n".join(text_parts), "pdf+ocr" if scanned else "pdf_text", len(pages)
     if suffix == ".txt":

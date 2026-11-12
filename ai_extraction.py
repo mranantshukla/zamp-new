@@ -7,6 +7,7 @@ validation and the AP decision remain downstream of this module.
 from __future__ import annotations
 
 import json
+import os
 import re
 from urllib import request
 
@@ -28,7 +29,7 @@ def _call_model(text: str, config: dict) -> dict:
     prompt = {
         "task": "Extract invoice header fields from OCR text. Do not guess. For every value, include an exact OCR evidence quote that proves it.",
         "required_output": {"fields": {"invoice_number": {"value": "string or null", "evidence": "exact OCR quote"}, "vendor": {"value": "string or null", "evidence": "exact OCR quote"}, "po_number": {"value": "string or null", "evidence": "exact OCR quote"}, "gstin": {"value": "string or null", "evidence": "exact OCR quote"}, "date": {"value": "date exactly as printed or null", "evidence": "exact OCR quote"}, "total": {"value": "number or null", "evidence": "exact OCR quote"}, "subtotal": {"value": "number or null", "evidence": "exact OCR quote"}, "tax": {"value": "number or null", "evidence": "exact OCR quote"}, "discount": {"value": "number or null", "evidence": "exact OCR quote"}}},
-        "ocr_text": text[:30000],
+        "ocr_text": text[:int(os.getenv("AI_OCR_MAX_CHARS", "12000"))],
     }
     payload = {"model": model, "temperature": 0, "response_format": {"type": "json_object"},
                "messages": [{"role": "system", "content": "Return only valid JSON. Never infer absent data."},
@@ -36,7 +37,7 @@ def _call_model(text: str, config: dict) -> dict:
     try:
         req = request.Request(endpoint, data=json.dumps(payload).encode(), method="POST",
                               headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"})
-        with request.urlopen(req, timeout=15) as response:
+        with request.urlopen(req, timeout=float(os.getenv("AI_REQUEST_TIMEOUT", "12"))) as response:
             response_data = json.loads(response.read().decode())
         content = response_data["choices"][0]["message"]["content"].strip()
         if content.startswith("```"):

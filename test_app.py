@@ -209,6 +209,18 @@ def test_ai_configuration_masks_key_and_is_advisory(client):
     assert "top-secret" not in configured.get_data(as_text=True)
 
 
+def test_ai_connection_test_returns_safe_provider_status(client, monkeypatch):
+    with client.session_transaction() as sess: csrf = sess["csrf"]
+    monkeypatch.setattr(web, "_call_model", lambda *_: {"status":"UNAVAILABLE", "model":"test-model",
+                                                           "error":"HTTP 404: model unavailable"})
+    response = client.post("/api/ai/connection-test", headers={"X-CSRF-Token": csrf})
+    assert response.status_code == 503
+    assert response.json == {"status":"UNAVAILABLE", "model":"test-model", "error":"HTTP 404: model unavailable"}
+    monkeypatch.setattr(web, "_call_model", lambda *_: {"status":"COMPLETED", "model":"test-model", "fields":{}})
+    response = client.post("/api/ai/connection-test", headers={"X-CSRF-Token": csrf})
+    assert response.status_code == 200 and response.json["status"] == "COMPLETED"
+
+
 def test_ai_ocr_reconciliation_requires_local_ocr_evidence(monkeypatch):
     invoice = {"invoice_number": None, "vendor": "Acme", "po_number": None, "date": None,
                "total": None, "subtotal": None, "tax": None, "discount": None, "details": {},

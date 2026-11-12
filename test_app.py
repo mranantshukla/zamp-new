@@ -1,6 +1,7 @@
 import io
 import json
 import time
+from urllib.error import HTTPError
 from concurrent.futures import ThreadPoolExecutor
 
 import fitz
@@ -77,6 +78,44 @@ def test_clean_pdf_duplicate_and_persistence(client):
     assert client.get("/api/runs/" + first["run_id"]).json["status"] == "APPROVED"
 
 
+def test_ocr_cache_persists_but_decisions_are_recomputed(client, monkeypatch):
+    calls = []
+    def fake_ocr(data):
+        calls.append(data)
+        return invoice_text(number="CACHED-1")
+    monkeypatch.setattr(processor, "_ocr_image", fake_ocr)
+    raw = b"\x89PNG\r\n\x1a\nunique-cache-test"
+    first = submit(client, raw, "first.png")
+    assert first["status"] == "APPROVED" and first["ocr_cache_hit"] is False
+    storage.engine.dispose()
+    second = submit(client, raw, "again.png")
+    assert second["status"] == "REJECTED" and second["ocr_cache_hit"] is True
+    assert len(calls) == 1
+    assert "cached" in next(s["detail"] for s in second["stages"] if s["stage"] == "PDF text / OCR" and s["status"] == "COMPLETED")
+
+
+def test_ai_http_error_detail_is_reported_without_key(monkeypatch):
+    from io import BytesIO
+    body = b'{"error":{"message":"model unavailable for token-secret"}}'
+    def fail(*_args, **_kwargs):
+        raise HTTPError("https://example.test", 404, "Not Found", None, BytesIO(body))
+    monkeypatch.setattr(ai_extraction.request, "urlopen", fail)
+    result = ai_extraction._call_model("Invoice No: X", {"endpoint":"https://example.test",
+                                               "model":"test-model", "api_key":"token-secret"})
+    assert result["status"] == "UNAVAILABLE"
+    assert "HTTP 404" in result["error"] and "[redacted]" in result["error"]
+    assert "token-secret" not in result["error"]
+
+
+def test_login_session_has_persistent_cookie(client, monkeypatch):
+    monkeypatch.setenv("DEMO_USERNAME", "demo")
+    monkeypatch.setenv("DEMO_PASSWORD", "password")
+    response = client.post("/login", data={"username":"demo", "password":"password"})
+    assert response.status_code == 302
+    assert "Expires=" in response.headers["Set-Cookie"]
+    assert client.get("/api/runs").status_code == 200
+
+
 @pytest.mark.parametrize("change,expected", [
     ({"number":""}, "PENDING_REVIEW"), ({"total":""}, "PENDING_REVIEW"),
     ({"date":"31/02/2026"}, "PENDING_REVIEW"), ({"vendor":"Wrong Vendor"}, "PENDING_REVIEW"),
@@ -101,7 +140,11 @@ def test_scanned_pdf_image_and_ocr_failure(client, monkeypatch):
     image_run = submit(client, out.getvalue(), "bill.png")
     assert image_run["method"] == "ocr"
     monkeypatch.setattr(processor, "_ocr_image", lambda data: (_ for _ in ()).throw(RuntimeError("OCR unavailable")))
-    failure = submit(client, out.getvalue(), "broken.png")
+    # A different document must still exercise OCR failure; an identical image
+    # correctly reuses the prior successful OCR result.
+    broken_image = Image.new("RGB", (600,400), "gray")
+    broken_bytes = io.BytesIO(); broken_image.save(broken_bytes, format="PNG")
+    failure = submit(client, broken_bytes.getvalue(), "broken.png")
     assert failure["status"] == "FAILED"
     assert any(s["status"] == "FAILED" for s in failure["stages"])
 

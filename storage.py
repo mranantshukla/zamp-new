@@ -38,6 +38,9 @@ reviews = Table("manual_reviews", meta, Column("id", String(36), primary_key=Tru
                 Column("reviewer", String(80), nullable=False), Column("outcome", String(30), nullable=False),
                 Column("note", Text, nullable=False), Column("corrections", Text, nullable=False),
                 Column("revised_decision", Text), Column("at", DateTime(timezone=True), nullable=False))
+ocr_cache = Table("ocr_cache", meta, Column("key", String(100), primary_key=True),
+                  Column("text", Text, nullable=False), Column("method", String(20), nullable=False),
+                  Column("pages", Integer, nullable=False), Column("created_at", DateTime(timezone=True), nullable=False))
 
 def now(): return datetime.now(timezone.utc)
 
@@ -68,6 +71,21 @@ def create_run(source, event_type, document=None, mime=None):
         conn.execute(insert(runs).values(id=rid, document_id=did, created_at=now(), source=source,
                                          event_type=event_type, status="RUNNING", payload="{}"))
     return rid
+
+def cached_ocr(key):
+    with engine.connect() as conn:
+        row = conn.execute(select(ocr_cache.c.text, ocr_cache.c.method, ocr_cache.c.pages)
+                           .where(ocr_cache.c.key == key)).first()
+        return tuple(row) if row else None
+
+def save_ocr(key, value):
+    from sqlalchemy.exc import IntegrityError
+    try:
+        with engine.begin() as conn:
+            conn.execute(insert(ocr_cache).values(key=key, text=value[0], method=value[1],
+                                                  pages=value[2], created_at=now()))
+    except IntegrityError:
+        pass  # A concurrent run stored the same document first.
 
 def add_stage(rid, stage, status, detail=""):
     with engine.begin() as conn:
@@ -127,7 +145,7 @@ def record_review(rid, reviewer, outcome, note, corrections, revised_decision=No
                                             revised_decision=json.dumps(revised_decision, default=str) if revised_decision else None,
                                             at=now()))
 
-def locked_decision(rid, invoice, po_path, method, extra=None):
+def locked_decision(rid, invoice, po_path, method, extra=None, finalize=None):
     """Serialize PO consumption and duplicate decisions with the run commit."""
     from asa_invoice_processor import decide
     with decision_lock:
@@ -135,11 +153,16 @@ def locked_decision(rid, invoice, po_path, method, extra=None):
             if engine.dialect.name == "postgresql": conn.execute(text("SELECT pg_advisory_xact_lock(9183415)"))
             history = [_row(r) for r in conn.execute(select(runs).where(runs.c.status != "RUNNING")).mappings()]
             decision = decide(invoice, po_path, method=method, history_rows=history)
+            final_extra, final_stages = finalize(decision) if finalize else ({}, [])
             payload = {"invoice": decision.invoice, "invoice_number": invoice.get("invoice_number"),
                        "vendor": invoice.get("vendor"), "gstin": invoice.get("gstin"),
                        "po_number": invoice.get("po_number"), "total": invoice.get("total"),
                        "document_type": decision.document_type, "method": method,
-                       "decision": decision.__dict__, "reasons": decision.reasons, **(extra or {})}
+                       "decision": decision.__dict__, "reasons": decision.reasons,
+                       **(extra or {}), **final_extra}
+            for name, status, detail in final_stages:
+                conn.execute(insert(stages).values(run_id=rid, stage=name, status=status,
+                                                   detail=detail, at=now()))
             conn.execute(update(runs).where(runs.c.id == rid).values(payload=json.dumps(payload, default=str), status=decision.status))
             return decision
 

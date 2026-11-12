@@ -10,6 +10,7 @@ import json
 import os
 import re
 from urllib import request
+from urllib.error import HTTPError
 
 from asa_invoice_processor import money
 
@@ -43,8 +44,18 @@ def _call_model(text: str, config: dict) -> dict:
         if content.startswith("```"):
             content = content.strip("` \n").removeprefix("json\n")
         return {"status": "COMPLETED", "model": model, "fields": json.loads(content).get("fields", {})}
+    except HTTPError as exc:
+        try:
+            provider = json.loads(exc.read(4096).decode("utf-8", errors="replace"))
+            detail = str(provider.get("error", {}).get("message", ""))
+        except (ValueError, AttributeError, OSError):
+            detail = ""
+        detail = detail.replace(api_key, "[redacted]") if api_key else detail
+        return {"status": "UNAVAILABLE", "model": model,
+                "error": f"HTTP {exc.code}: {detail[:240] or exc.reason}", "fields": {}}
     except Exception as exc:
-        return {"status": "UNAVAILABLE", "model": model, "error": str(exc)[:180], "fields": {}}
+        detail = str(exc).replace(api_key, "[redacted]") if api_key else str(exc)
+        return {"status": "UNAVAILABLE", "model": model, "error": detail[:180], "fields": {}}
 
 
 def reconcile_ocr(invoice: dict, text: str, config: dict) -> tuple[dict, dict]:

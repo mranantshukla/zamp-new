@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import hmac
+import hashlib
 import json
 import logging
 import os
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template_string, request, session, url_for
 from werkzeug.utils import secure_filename
 
 import storage
+import asa_invoice_processor as processor
 from asa_invoice_processor import classify_document, extract_invoice, read_document
 from asa_dashboard import dataset_rows, dataset_image_bytes, evaluate_dataset
 from ai_review import review_invoice
@@ -22,6 +25,7 @@ ROOT = Path(__file__).parent
 app = Flask(__name__)
 app.secret_key = os.getenv("APP_SECRET", "local-development-secret-change-before-deployment")
 app.config.update(MAX_CONTENT_LENGTH=8 * 1024 * 1024,
+                  PERMANENT_SESSION_LIFETIME=timedelta(days=7),
                   SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
                   SESSION_COOKIE_SECURE=bool(os.getenv("RENDER")))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -69,6 +73,7 @@ def login():
         password = os.getenv("DEMO_PASSWORD", "")
         if user and password and hmac.compare_digest(request.form.get("username", ""), user) and hmac.compare_digest(request.form.get("password", ""), password):
             session.clear(); session["authenticated"] = True
+            session.permanent = True
             session["csrf"] = os.urandom(24).hex()
             return redirect(url_for("index"))
         return render_template_string(LOGIN_HTML, error="Invalid credentials"), 401
@@ -89,6 +94,16 @@ def validate_file(filename, raw):
 def stage(rid, name, status, detail=""):
     storage.add_stage(rid, name, status, detail)
 
+def read_document_cached(raw, suffix):
+    version = f"ocr-v2:{suffix.lower()}:{processor.OCR_PDF_DPI}:{processor.OCR_ENHANCED_PASS}:1"
+    key = hashlib.sha256(version.encode() + b"\0" + raw).hexdigest()
+    cached = storage.cached_ocr(key)
+    if cached is not None:
+        return (*cached, True)
+    result = read_document(raw, suffix)
+    storage.save_ocr(key, result)
+    return (*result, False)
+
 def process_run(rid, raw, suffix, event_type="upload", label=None):
     started = time.monotonic()
     current = "Document received"
@@ -98,8 +113,8 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         stage(rid, current, "COMPLETED", f"{len(raw)} bytes received")
         current = "PDF text / OCR"; stage(rid, current, "RUNNING")
         ocr_started = time.monotonic()
-        text, method, pages = read_document(raw, suffix)
-        stage(rid, current, "COMPLETED", f"{method}; {pages} page(s); {time.monotonic()-ocr_started:.2f}s")
+        text, method, pages, cache_hit = read_document_cached(raw, suffix)
+        stage(rid, current, "COMPLETED", f"{method}; {pages} page(s); {time.monotonic()-ocr_started:.2f}s" + ("; cached" if cache_hit else ""))
         current = "Document classification"; stage(rid, current, "RUNNING")
         kind = classify_document(text)
         stage(rid, current, "COMPLETED", kind)
@@ -120,7 +135,7 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         elif ai_extraction["status"] in ("NOT_CONFIGURED", "SKIPPED"):
             stage(rid, current, "SKIPPED", ai_extraction.get("reason", "No AI extraction model configured; deterministic OCR retained"))
         else:
-            stage(rid, current, "BLOCKED", "AI extraction unavailable; deterministic OCR retained")
+            stage(rid, current, "BLOCKED", "AI extraction unavailable: " + ai_extraction.get("error", "Unknown provider error"))
         current = "Extraction validation"; stage(rid, current, "RUNNING")
         missing = [k for k in ("invoice_number", "vendor", "date", "total") if not invoice.get(k)]
         stage(rid, current, "BLOCKED" if missing else "COMPLETED", "Missing: " + ", ".join(missing) if missing else "Key fields present")
@@ -132,35 +147,34 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         current = "AP decision"; stage(rid, current, "RUNNING")
         current = "AI evidence review"; stage(rid, current, "RUNNING")
         current = "History persistence"; stage(rid, current, "RUNNING")
-        # Benchmark labels enter only after extraction and the AP decision.
-        decision = storage.locked_decision(rid, invoice, ROOT / "samples" / "pos.csv", method)
-        # The configured model has already participated in evidence-gated
-        # extraction. Keep the review local to avoid a second remote request.
-        ai_review = review_invoice(invoice, decision)
-        stage(rid, "AI evidence review", "COMPLETED", ai_review["recommendation"])
-        storage.finish_run(rid, {**{k:v for k,v in storage.get_run(rid).items()
-                                    if k not in ("run_id", "time", "created_at", "document_id", "source", "event_type", "status", "stages", "reviews")},
-                                 "ai_extraction": ai_extraction, "ai_review": ai_review,
-                                 "timings": {"ocr_seconds": round(time.monotonic()-ocr_started, 2),
-                                             "ai_extraction_seconds": round(time.monotonic()-ai_started, 2),
-                                             "total_seconds": round(time.monotonic()-started, 2)}}, decision.status)
-        checks = {c["check"]: c for c in decision.checks}
-        stage(rid, "Vendor verification", "COMPLETED" if checks.get("vendor_master", {}).get("passed") else "BLOCKED",
-              checks.get("vendor_master", {}).get("detail", "Vendor unverified"))
-        stage(rid, "PO matching", "COMPLETED" if decision.po_matching["status"] == "MATCHED" else "BLOCKED",
-              decision.po_matching["explanation"])
-        stage(rid, "Financial validation", "COMPLETED" if decision.financial_validation["status"] == "PASSED" else "BLOCKED",
-              decision.financial_validation["status"])
-        stage(rid, "Duplicate detection", "BLOCKED" if not checks["duplicate_detection"]["passed"] else "COMPLETED",
-              checks["duplicate_detection"]["detail"])
-        stage(rid, "AP decision", "COMPLETED", decision.status)
-        stage(rid, "History persistence", "COMPLETED", f"Run completed in {time.monotonic()-started:.2f}s")
-        if event_type == "dataset_evaluation" and label is not None:
-            comparisons, accuracy = evaluate_dataset(invoice, label)
-            run = storage.get_run(rid)
-            payload = {k:v for k,v in run.items() if k not in ("run_id","time","created_at","document_id","source","event_type","status","stages","reviews")}
-            payload.update(field_accuracy=accuracy, comparisons=comparisons)
-            storage.finish_run(rid, payload, decision.status)
+        # Save the decision, advisory review, benchmark and final stages in one
+        # transaction. A terminal status is never visible with a partial run.
+        def finalize(decision):
+            ai_review = review_invoice(invoice, decision)
+            checks = {c["check"]: c for c in decision.checks}
+            extra = {"ai_extraction": ai_extraction, "ai_review": ai_review,
+                     "timings": {"ocr_seconds": round(time.monotonic()-ocr_started, 2),
+                                 "ai_extraction_seconds": round(time.monotonic()-ai_started, 2),
+                                 "total_seconds": round(time.monotonic()-started, 2)},
+                     "ocr_cache_hit": cache_hit}
+            if event_type == "dataset_evaluation" and label is not None:
+                comparisons, accuracy = evaluate_dataset(invoice, label)
+                extra.update(field_accuracy=accuracy, comparisons=comparisons)
+            final_stages = [
+                ("Vendor verification", "COMPLETED" if checks.get("vendor_master", {}).get("passed") else "BLOCKED",
+                 checks.get("vendor_master", {}).get("detail", "Vendor unverified")),
+                ("PO matching", "COMPLETED" if decision.po_matching["status"] == "MATCHED" else "BLOCKED",
+                 decision.po_matching["explanation"]),
+                ("Financial validation", "COMPLETED" if decision.financial_validation["status"] == "PASSED" else "BLOCKED",
+                 decision.financial_validation["status"]),
+                ("Duplicate detection", "BLOCKED" if not checks["duplicate_detection"]["passed"] else "COMPLETED",
+                 checks["duplicate_detection"]["detail"]),
+                ("AP decision", "COMPLETED", decision.status),
+                ("AI evidence review", "COMPLETED", ai_review["recommendation"]),
+                ("History persistence", "COMPLETED", f"Run completed in {time.monotonic()-started:.2f}s"),
+            ]
+            return extra, final_stages
+        storage.locked_decision(rid, invoice, ROOT / "samples" / "pos.csv", method, finalize=finalize)
     except Exception as exc:
         log.exception("run %s failed at %s", rid, current)
         stage(rid, current, "FAILED", str(exc)[:240])
@@ -250,7 +264,7 @@ def events(rid):
     if not storage.get_run(rid): abort(404)
     def generate():
         seen = 0
-        for _ in range(300):
+        for _ in range(900):
             row = storage.get_run(rid)
             events = row["stages"]
             for item in events[seen:]: yield "data: " + json.dumps(item, default=str) + "\n\n"
@@ -258,7 +272,7 @@ def events(rid):
             if row["status"] != "RUNNING":
                 yield "event: finished\ndata: " + json.dumps({"status":row["status"]}) + "\n\n"
                 break
-            time.sleep(0.4)
+            time.sleep(1.0)
     return Response(generate(), mimetype="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
 
 @app.get("/api/runs/<rid>/document")

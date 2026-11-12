@@ -16,6 +16,7 @@ import storage
 from asa_invoice_processor import classify_document, extract_invoice, read_document
 from asa_dashboard import dataset_rows, dataset_image_bytes, evaluate_dataset
 from ai_review import review_invoice
+from ai_extraction import reconcile_ocr
 
 ROOT = Path(__file__).parent
 app = Flask(__name__)
@@ -41,7 +42,7 @@ AI_RUNTIME_CONFIG = {
 }
 
 STAGE_NAMES = ["Document received", "PDF text / OCR", "Document classification", "Field extraction",
-               "Extraction validation", "Vendor verification", "PO matching", "Financial validation",
+               "AI OCR reconciliation", "Extraction validation", "Vendor verification", "PO matching", "Financial validation",
                "Duplicate detection", "AP decision", "AI evidence review", "History persistence"]
 
 def logged_in():
@@ -104,6 +105,17 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         current = "Field extraction"; stage(rid, current, "RUNNING")
         invoice = extract_invoice(text)
         stage(rid, current, "COMPLETED", f"{sum(bool(invoice.get(k)) for k in ('invoice_number','vendor','po_number','date','total'))}/5 key fields detected")
+        current = "AI OCR reconciliation"; stage(rid, current, "RUNNING")
+        # Optional: reconcile OCR text before decisioning. Dataset labels are
+        # intentionally unavailable here and unsupported proposals are dropped.
+        invoice, ai_extraction = reconcile_ocr(invoice, text, AI_RUNTIME_CONFIG)
+        detected = sum(bool(invoice.get(k)) for k in ("invoice_number", "vendor", "po_number", "date", "total"))
+        if ai_extraction["status"] == "COMPLETED":
+            stage(rid, current, "COMPLETED", f"{len(ai_extraction['accepted_fields'])} OCR-backed field(s) accepted; {detected}/5 key fields detected")
+        elif ai_extraction["status"] == "NOT_CONFIGURED":
+            stage(rid, current, "SKIPPED", "No AI extraction model configured; deterministic OCR retained")
+        else:
+            stage(rid, current, "BLOCKED", "AI extraction unavailable; deterministic OCR retained")
         current = "Extraction validation"; stage(rid, current, "RUNNING")
         missing = [k for k in ("invoice_number", "vendor", "date", "total") if not invoice.get(k)]
         stage(rid, current, "BLOCKED" if missing else "COMPLETED", "Missing: " + ", ".join(missing) if missing else "Key fields present")
@@ -121,7 +133,7 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         stage(rid, "AI evidence review", "COMPLETED", ai_review["recommendation"])
         storage.finish_run(rid, {**{k:v for k,v in storage.get_run(rid).items()
                                     if k not in ("run_id", "time", "created_at", "document_id", "source", "event_type", "status", "stages", "reviews")},
-                                 "ai_review": ai_review}, decision.status)
+                                 "ai_extraction": ai_extraction, "ai_review": ai_review}, decision.status)
         checks = {c["check"]: c for c in decision.checks}
         stage(rid, "Vendor verification", "COMPLETED" if checks.get("vendor_master", {}).get("passed") else "BLOCKED",
               checks.get("vendor_master", {}).get("detail", "Vendor unverified"))
@@ -284,7 +296,7 @@ def index():
     css = css_path.read_text(encoding="utf-8")
     html = render_template_string(INDEX_HTML, csrf=session["csrf"], samples=samples, css=css)
     review_markup = "<section class='card' id='reviewqueue'><div class='section-heading'><div><span class='eyebrow'>WORK QUEUE</span><h2>Review queue</h2></div><span class='muted'>Human attention required</span></div><div id='reviewrows' class='timeline'><p class='muted'>No invoices currently require review.</p></div></section>"
-    config_markup = """<section class='card' id='aiconfiguration'><div class='section-heading'><div><span class='eyebrow'>OPTIONAL AI REVIEW</span><h2>Model configuration</h2></div><span class='muted'>Advisory only</span></div><div class='config-grid'><label>OpenAI-compatible endpoint<input id='aiendpoint' type='url' placeholder='https://api.openai.com/v1/chat/completions'></label><label>Model<input id='aimodel' placeholder='e.g. gpt-4.1-mini'></label><label>API key<input id='aiapikey' type='password' autocomplete='new-password' placeholder='Stored only for this server session'></label></div><button id='saveaiconfig' class='button'>Save AI configuration</button><p id='aiconfigmessage' class='muted'>The model is a second opinion only; it cannot change the AP decision.</p></section>"""
+    config_markup = """<section class='card' id='aiconfiguration'><div class='section-heading'><div><span class='eyebrow'>OPTIONAL AI ASSISTANCE</span><h2>Model configuration</h2></div><span class='muted'>Evidence-gated</span></div><div class='config-grid'><label>OpenAI-compatible endpoint<input id='aiendpoint' type='url' placeholder='https://api.openai.com/v1/chat/completions'></label><label>Model<input id='aimodel' placeholder='e.g. gemini-2.0-flash'></label><label>API key<input id='aiapikey' type='password' autocomplete='new-password' placeholder='Stored only for this server session'></label></div><button id='saveaiconfig' class='button'>Save AI configuration</button><p id='aiconfigmessage' class='muted'>The model reconciles OCR text before validation, then provides an advisory review. It cannot bypass PO, vendor, GST, duplicate, or financial checks.</p></section>"""
     html = html.replace("<section class='card' id='history'>", review_markup + config_markup + "<section class='card' id='history'>", 1)
     html = html.replace("<div id='reason'></div>", "<div id='reason'></div><section class='ai-review'><span class='eyebrow'>AI EVIDENCE REVIEW</span><div id='aiprofile' class='muted'>Waiting for automated evidence review.</div></section>", 1)
     sidebar = """<aside class='side'><div class='logo'>zamp<span>.</span></div><div class='side-caption'>DIGITAL WORKFORCE</div><nav class='app-nav' aria-label='Main navigation'><a href='#home'><span>⌂</span>Home</a><a href='#history'><span>▤</span>My invoices</a><a href='#upload'><span>⌁</span>Scan &amp; upload</a><a href='#reviewqueue'><span>!</span>Review centre</a><a href='#history'><span>◷</span>Reports</a><a href='#aiconfiguration'><span>⚙</span>AI configuration</a></nav><div class='side-footer'>AP Intelligence<br><b>Operational workspace</b></div></aside>"""
@@ -309,7 +321,7 @@ def index():
       target.innerHTML = `<b>${esc(review.recommendation)}</b><p>${esc(review.summary)}${esc(model)}</p>${flags ? `<small>${esc(flags)}</small>` : ''}`;
     };
     const endpoint = document.getElementById('aiendpoint'); if (!endpoint) return;
-    (async () => { try { const cfg = await (await fetch('/api/ai/config')).json(); endpoint.value=cfg.endpoint||''; document.getElementById('aimodel').value=cfg.model||''; document.getElementById('aiconfigmessage').textContent=cfg.api_key_configured ? 'A server-side key is configured. Enter a new key only to replace it for this session.' : 'The model is a second opinion only; it cannot change the AP decision.'; } catch (_) {} })();
+    (async () => { try { const cfg = await (await fetch('/api/ai/config')).json(); endpoint.value=cfg.endpoint||''; document.getElementById('aimodel').value=cfg.model||''; document.getElementById('aiconfigmessage').textContent=cfg.api_key_configured ? 'A server-side key is configured. It will reconcile OCR text before validation; enter a new key only to replace it for this session.' : 'The model reconciles OCR text before validation, then provides an advisory review. It cannot bypass business checks.'; } catch (_) {} })();
     document.getElementById('saveaiconfig').onclick = async () => { const message=document.getElementById('aiconfigmessage'); const response=await fetch('/api/ai/config',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({endpoint:endpoint.value,model:document.getElementById('aimodel').value,api_key:document.getElementById('aiapikey').value})}); const data=await response.json(); message.textContent=data.error || data.note || 'Configuration saved.'; if(response.ok) document.getElementById('aiapikey').value=''; };
     })();</script>"""
     html = html.replace("</head>", "<style>" + ui_overrides + "</style></head>", 1)

@@ -8,7 +8,9 @@ UNCERTAIN = "UNCERTAIN"
 BLOCKED = "BLOCKED"
 NA = "NOT_APPLICABLE"
 
-RELIABILITY = {"NONE": 0, "CONTEXTUAL": 1, "DIRECT_LABEL": 2, "MANUALLY_VERIFIED": 3}
+# AI_CORROBORATED means the model supplied a value *and* an evidence quote that
+# was independently found in the OCR text.  It is not a model confidence score.
+RELIABILITY = {"NONE": 0, "CONTEXTUAL": 1, "DIRECT_LABEL": 2, "AI_CORROBORATED": 2, "MANUALLY_VERIFIED": 3}
 
 @dataclass(frozen=True)
 class PolicyConfig:

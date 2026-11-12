@@ -11,6 +11,7 @@ from sqlalchemy import create_engine
 import app as web
 import storage
 import asa_invoice_processor as processor
+import ai_extraction
 
 
 @pytest.fixture
@@ -163,6 +164,25 @@ def test_ai_configuration_masks_key_and_is_advisory(client):
     assert configured.json["model"] == "review-model"
     assert configured.json["api_key_configured"] is True
     assert "top-secret" not in configured.get_data(as_text=True)
+
+
+def test_ai_ocr_reconciliation_requires_local_ocr_evidence(monkeypatch):
+    invoice = {"invoice_number": None, "vendor": "Acme", "po_number": None, "date": None,
+               "total": None, "subtotal": None, "tax": None, "discount": None, "details": {},
+               "field_metadata": {"vendor": {"reliability": "CONTEXTUAL"}}}
+    text = "Invoice No: A-1\nPO Number: PO-1\nInvoice Date: 10/11/2026\nGrand Total: 1,000.00"
+    monkeypatch.setattr(ai_extraction, "_call_model", lambda *_: {"status": "COMPLETED", "model": "test", "fields": {
+        "invoice_number": {"value": "A-1", "evidence": "Invoice No: A-1"},
+        "po_number": {"value": "PO-1", "evidence": "PO Number: PO-1"},
+        "date": {"value": "10/11/2026", "evidence": "Invoice Date: 10/11/2026"},
+        "total": {"value": "1000.00", "evidence": "Grand Total: 1,000.00"},
+        "vendor": {"value": "Invented", "evidence": "not in source"},
+    }})
+    merged, result = ai_extraction.reconcile_ocr(invoice, text, {"endpoint": "x", "model": "x", "api_key": "x"})
+    assert result["accepted_fields"] == ["invoice_number", "po_number", "date", "total"]
+    assert "vendor" in result["rejected_fields"]
+    assert merged["total"] == 1000.0
+    assert merged["field_metadata"]["total"]["reliability"] == "AI_CORROBORATED"
 
 
 def test_concurrent_duplicate_decision(client):

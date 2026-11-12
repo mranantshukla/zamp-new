@@ -220,7 +220,21 @@ def page(result=None, preview="", activity=None, dataset_preview=""):
     styles = (ROOT / "dashboard.css").read_text(encoding="utf-8")
     markup = markup.replace("</head>", f"<style>{styles}</style></head>", 1)
     approved = sum(r.get("status") == "APPROVED" for r in runs)
-    review = sum(r.get("status") in ("REJECTED", "PENDING_REVIEW", "FAILED") for r in runs)
+    rejected = sum(r.get("status") == "REJECTED" for r in runs)
+    pending = sum(r.get("status") == "PENDING_REVIEW" for r in runs)
+    failed = sum(r.get("status") == "FAILED" for r in runs)
+    review = rejected + pending + failed
+    completed = approved + rejected + pending
+    approval_rate = f"{approved / completed:.1%}" if completed else "—"
+    def queue_row(r):
+        return f"<tr><td>{esc(r.get('invoice_number'))}</td><td>{esc(r.get('vendor'))}</td><td>{esc(r.get('total'))}</td><td><span class='decision {str(r.get('status') or '').lower()}'>{esc(r.get('status')).replace('_',' ')}</span></td><td><a href='#history'>Open in register →</a></td></tr>"
+    queue = "".join(queue_row(r) for r in runs if r.get("status") == "PENDING_REVIEW")[:5000]
+    queue = queue or "<tr><td colspan='5' class='muted'>No invoices currently require review.</td></tr>"
+    max_decision = max(approved, rejected, pending, failed, 1)
+    distribution = "".join(
+        f"<div class='bar-row'><span>{label}</span><div class='bar-track'><i style='width:{count / max_decision * 100:.0f}%'></i></div><b>{count}</b></div>"
+        for label, count in (("Approved", approved), ("Pending review", pending), ("Rejected", rejected), ("Failed", failed))
+    )
     shell = (
         "<body><div class='app-shell'><aside class='sidebar'>"
         "<div class='brand'><span class='brand-mark'>Z</span><div><div class='brand-name'>zamp<span style='color:#ffec72'>.</span></div><div class='brand-sub'>AP case study</div></div></div>"
@@ -228,7 +242,8 @@ def page(result=None, preview="", activity=None, dataset_preview=""):
         "<a class='active' href='#overview'><span class='nav-icon'>◈</span><span class='nav-text'>Overview</span></a>"
         "<a href='#new-bill'><span class='nav-icon'>⊕</span><span class='nav-text'>New bill</span></a>"
         "<a href='#run-monitor'><span class='nav-icon'>▤</span><span class='nav-text'>Run monitor</span></a>"
-        "<a href='#history'><span class='nav-icon'>◷</span><span class='nav-text'>History</span></a>"
+        "<a href='#review-queue'><span class='nav-icon'>!</span><span class='nav-text'>Review queue</span></a>"
+        "<a href='#history'><span class='nav-icon'>◷</span><span class='nav-text'>Audit trail</span></a>"
         "</div></nav><div class='sidebar-foot'><b>Invoice operations</b><br>Review every bill before payment approval.</div>"
         "</aside><main class='content' id='overview'>"
         "<div class='topbar'><div class='breadcrumb'>Workspace / Accounts payable / Overview</div>"
@@ -237,15 +252,24 @@ def page(result=None, preview="", activity=None, dataset_preview=""):
         "<h1>Your bills, under control.</h1><p>Upload, inspect and verify invoices in one workspace.</p></div>"
         "<div class='hero-art' aria-hidden='true'>✦</div></section>"
         "<div class='metrics'>"
-        f"<div class='metric'><div class='metric-label'>Total runs</div><div class='metric-value'>{len(runs)}</div><div class='metric-note'>Recorded in history</div></div>"
-        f"<div class='metric'><div class='metric-label'>Approved</div><div class='metric-value'>{approved}</div><div class='metric-note'>Passed checks</div></div>"
-        f"<div class='metric'><div class='metric-label'>Needs attention</div><div class='metric-value'>{review}</div><div class='metric-note'>Rejected or pending</div></div>"
+        f"<div class='metric'><div class='metric-label'>Invoices processed</div><div class='metric-value'>{len(runs)}</div><div class='metric-note'>Recorded in history</div></div>"
+        f"<div class='metric'><div class='metric-label'>Auto-approval rate</div><div class='metric-value'>{approval_rate}</div><div class='metric-note'>Completed decisions</div></div>"
+        f"<div class='metric'><div class='metric-label'>Pending reviews</div><div class='metric-value'>{pending}</div><div class='metric-note'>Human attention required</div></div>"
+        f"<div class='metric'><div class='metric-label'>Rejected</div><div class='metric-value'>{rejected}</div><div class='metric-note'>Confirmed violations</div></div>"
+        f"<div class='metric'><div class='metric-label'>Failures</div><div class='metric-value'>{failed}</div><div class='metric-note'>Processing did not finish</div></div>"
+        "<div class='metric'><div class='metric-label'>Avg processing time</div><div class='metric-value'>—</div><div class='metric-note'>Timing not recorded</div></div>"
         "</div><div class='workspace-grid'>"
     )
     markup = markup.replace(
         "<body><main><div class='topbar'><div><h1>AP Invoice Intelligence</h1><div class='muted'>Payment-operations control center</div></div><span class='status'>● System online</span></div><div class='grid'>",
         shell, 1,
     )
+    analytics = ("<div class='two-col analytics-grid'>"
+                 "<section class='card'><div class='section-heading'><div><span class='eyebrow'>DECISION MIX</span><h2>Processing outcomes</h2></div><span class='muted'>Live history</span></div>"
+                 f"<div class='bar-chart'>{distribution}</div></section>"
+                 "<section class='card' id='review-queue'><div class='section-heading'><div><span class='eyebrow'>WORK QUEUE</span><h2>Review queue</h2></div><span class='decision pending_review'>"
+                 f"{pending} open</span></div><p class='section-sub'>Invoices with uncertain extraction or evidence that needs a human decision.</p><div class='table-wrap'><table><tr><th>Invoice</th><th>Vendor</th><th>Amount</th><th>Status</th><th>Action</th></tr>{queue}</table></div></section></div>")
+    markup = markup.replace("</main>", analytics + "</main>", 1)
     markup = markup.replace("<section class='card'><span class='eyebrow'>INPUT</span><h2>Upload Bill</h2>",
                             "<section class='card' id='new-bill'><span class='eyebrow'>CREATE A NEW RUN</span><h2>Add a bill</h2><p class='section-sub'>Choose a PDF or image, or try a real GST invoice sample.</p>", 1)
     markup = markup.replace("<form method='post' enctype='multipart/form-data'><label>Upload from computer</label><input type='file' name='invoice_file' accept='.pdf,.png,.jpg,.jpeg' required><button>Fetch details</button></form>",

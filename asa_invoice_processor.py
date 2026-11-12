@@ -239,6 +239,26 @@ def extract_invoice(text: str) -> dict:
                 return lines[index + 1].strip(" :#.-")
         return None
 
+    def numeric_label_value(label_pattern, *, prefer_last=False):
+        """Return a nearby monetary value for a printed label.
+
+        Many invoices put a label and its value on separate OCR lines.  This
+        deliberately looks only a few lines ahead and rejects bare currency
+        headings such as ``Amount Due (INR)``.
+        """
+        candidates = []
+        for index, line in enumerate(lines):
+            if not re.search(rf"^\s*(?:{label_pattern})(?:\s*[:#-].*)?$", line, re.I):
+                continue
+            for candidate in lines[index:index + 4]:
+                value = money(candidate)
+                if value is not None:
+                    candidates.append((candidate, value))
+                    break
+        if not candidates:
+            return None
+        return candidates[-1][0] if prefer_last else candidates[0][0]
+
     def block_after(label_pattern, stop_pattern):
         start = next((i for i, line in enumerate(lines) if re.search(label_pattern, line, re.I)), None)
         if start is None: return None
@@ -250,9 +270,9 @@ def extract_invoice(text: str) -> dict:
 
     def dated(value):
         if not value: return None
-        found = pick([r"(\d{4}-\d{2}-\d{2})", r"(\d{2}[/-]\d{2}[/-]\d{4})", r"(\d{2}-\d{2}-\d{4})"], value)
+        found = pick([r"(\d{4}-\d{2}-\d{2})", r"(\d{2}[/.\-]\d{2}[/.\-]\d{4})", r"(\d{1,2}-[A-Za-z]{3,9}-\d{4})"], value)
         if not found: return None
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d-%b-%Y", "%d-%B-%Y"):
             try: datetime.strptime(found, fmt); return found
             except ValueError: pass
         return None
@@ -278,6 +298,30 @@ def extract_invoice(text: str) -> dict:
         invoice_index = next((i for i, line in enumerate(lines) if re.search(r"invoice\s*(?:number|no)|invoice\s*no", line, re.I)), None)
         if invoice_index is not None:
             invoice_number = next((line for line in lines[invoice_index + 1:invoice_index + 5] if re.search(r"[A-Z0-9]+[/\-][A-Z0-9/\-]+", line, re.I)), invoice_number)
+    # Header-style layouts put several labels in one row and their values in a
+    # later row.  Use the local label neighbourhood; it is not dataset-aware.
+    issue_index = next((i for i, line in enumerate(lines) if re.fullmatch(r"date\s+of\s+issue", line, re.I)), None)
+    number_index = next((i for i, line in enumerate(lines) if re.fullmatch(r"invoice\s+number", line, re.I)), None)
+    due_index = next((i for i, line in enumerate(lines) if re.fullmatch(r"amount\s+due.*", line, re.I)), None)
+    if issue_index is not None and number_index is not None and due_index is not None and issue_index < number_index < due_index:
+        window = lines[due_index + 1:due_index + 8]
+        date_candidate = next((dated(line) for line in window if dated(line)), None)
+        number_candidate = None
+        for candidate in window:
+            candidate = candidate.strip(" .")
+            if dated(candidate):
+                continue
+            if re.fullmatch(r"[A-Z0-9][A-Z0-9/_-]{3,}", candidate, re.I) and re.search(r"\d", candidate):
+                number_candidate = candidate
+                break
+        if date_candidate: invoice_date_from_header = date_candidate
+        else: invoice_date_from_header = None
+        if number_candidate: invoice_number = number_candidate
+    else:
+        invoice_date_from_header = None
+    invalid_invoice = r"^(?:to|original|copy|dated|page\s+\d+|customer\s*(?:no|number)|amount\s+due.*|invoice\s*(?:no|number))$"
+    if invoice_number and re.fullmatch(invalid_invoice, invoice_number.strip(), re.I):
+        invoice_number = None
     po_number = extract_reference(lines, r"^(?:cust(?:omer)?\.?\s*p\.?o\.?|p\.?\s*o\.?|purchase\s*order)(?:\s*(?:number|no\.?|#))?\b")
     delivery_number = extract_reference(lines, r"^(?:delivery|challan)\s*(?:number|no\.?|#)\b")
     customer_order_number = extract_reference(lines, r"^customer\s*order\s*(?:number|no\.?|#)\b")
@@ -309,7 +353,7 @@ def extract_invoice(text: str) -> dict:
     gstin = seller_gstins[0] if len(set(seller_gstins)) == 1 and seller_gstins else None
     if not gstin and len(set(gstins)) == 1 and not buyer_gstins: gstin = gstins[0].upper()
     identity_ambiguous = len(set(seller_gstins)) > 1 or (len(set(gstins)) > 1 and not seller_gstins)
-    invoice_date = dated(label_value(r"invoice\s*date|inv\.?\s*date|date"))
+    invoice_date = invoice_date_from_header or dated(label_value(r"invoice\s*date|inv\.?\s*date|date\s*of\s*issue|date"))
     due_date = dated(label_value(r"due\s*date|payment\s*due"))
     po_date = dated(label_value(r"(?:p\.?o\.?|purchase\s*order)\s*date"))
     order_number = label_value(r"order\s*(?:number|no\.?)")
@@ -329,6 +373,8 @@ def extract_invoice(text: str) -> dict:
         total_raw = next((line for line in lines[max(0, lines.index(total_raw)):][:4] if money(line) is not None), None) if total_raw in lines else None
     if not total_raw and document_type != "PURCHASE_ORDER": total_raw = pick([rf"(?:grand\s*total|invoice\s*total|amount\s*due)\s*[:#-]?\s*{MONEY}"])
     total_value = money(total_raw)
+    if total_value is None and document_type != "PURCHASE_ORDER":
+        total_value = money(numeric_label_value(r"grand\s*total|invoice\s*total|total\s*amount|total", prefer_last=True))
     if total_value is None and document_type != "PURCHASE_ORDER":
         total_value = money(pick([r"grand\s*total.*?(\d[\d,]*(?:\.\d{1,2})?)", r"\bonly\s+(\d[\d,]*(?:\.\d{1,2})?)"], clean))
     subtotal_raw = label_value(r"sub\s*-?\s*total|subtotal|taxable\s*value|net\s*before\s*tax")

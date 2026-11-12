@@ -140,6 +140,36 @@ def test_image_pipeline_and_ocr_failure():
             processor.read_document(b"image", ".jpg")
 
 
+def test_header_style_invoice_uses_following_value_row():
+    text = """TAX INVOICE
+ExpoHub
+Date of Issue
+Invoice Number
+Amount Due (INR)
+22/04/2020
+Rahul Jignesh
+873100.
+Rs.89,600.00
+Due Date
+22/05/2020
+Subtotal
+89,600.00
+Tax
+0.00
+Total
+89,600.00
+"""
+    extracted = processor.extract_invoice(text)
+    assert extracted["invoice_number"] == "873100"
+    assert extracted["date"] == "22/04/2020"
+    assert extracted["total"] == 89600.0
+
+
+def test_bad_invoice_heading_is_not_an_invoice_number():
+    extracted = processor.extract_invoice("TAX INVOICE\nInvoice No\nDated\n6-May-2021\n")
+    assert extracted["invoice_number"] is None
+
+
 def test_selective_ocr_preprocessing_only_targets_low_contrast_images():
     white = Image.new("RGB", (180, 80), "white")
     high = BytesIO(); white.save(high, format="PNG")

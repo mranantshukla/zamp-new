@@ -55,6 +55,7 @@ class Decision:
 def classify_document(text: str) -> str:
     head = " ".join(text[:2500].upper().split())
     for pattern, kind in (
+        (r"\bPURCHASE\s*ORDER\b", "PURCHASE_ORDER"),
         (r"\bDELIVERY\s*CHALLAN\b", "DELIVERY_CHALLAN"),
         (r"\bCREDIT\s*NOTE\b", "CREDIT_NOTE"),
         (r"\bDEBIT\s*NOTE\b", "DEBIT_NOTE"),
@@ -319,12 +320,16 @@ def extract_invoice(text: str) -> dict:
     salesperson = label_value(r"salesperson|sales\s*person")
     pan = label_value(r"pan(?:\s*no\.?)?")
 
-    total_raw = label_value(r"grand\s*total|invoice\s*total|amount\s*due|total\s*amount|total")
+    document_type = classify_document(text)
+    po_total_raw = label_value(r"total\s*purchase\s*order\s*value|purchase\s*order\s*total|item\s*total\s*value") if document_type == "PURCHASE_ORDER" else None
+    if document_type == "PURCHASE_ORDER" and (not po_total_raw or money(po_total_raw) is None):
+        po_total_raw = pick([rf"(?:total\s*purchase\s*order\s*value|purchase\s*order\s*total|item\s*total\s*value)\s*[:#-]?\s*{MONEY}"])
+    total_raw = None if document_type == "PURCHASE_ORDER" else label_value(r"grand\s*total|invoice\s*total|amount\s*due|total\s*amount|total")
     if total_raw and money(total_raw) is None:
         total_raw = next((line for line in lines[max(0, lines.index(total_raw)):][:4] if money(line) is not None), None) if total_raw in lines else None
-    if not total_raw: total_raw = pick([rf"(?:grand\s*total|invoice\s*total|amount\s*due)\s*[:#-]?\s*{MONEY}"])
+    if not total_raw and document_type != "PURCHASE_ORDER": total_raw = pick([rf"(?:grand\s*total|invoice\s*total|amount\s*due)\s*[:#-]?\s*{MONEY}"])
     total_value = money(total_raw)
-    if total_value is None:
+    if total_value is None and document_type != "PURCHASE_ORDER":
         total_value = money(pick([r"grand\s*total.*?(\d[\d,]*(?:\.\d{1,2})?)", r"\bonly\s+(\d[\d,]*(?:\.\d{1,2})?)"], clean))
     subtotal_raw = label_value(r"sub\s*-?\s*total|subtotal|taxable\s*value|net\s*before\s*tax")
     discount_raw = label_value(r"discount|rebate|less\s*:?")
@@ -381,6 +386,7 @@ def extract_invoice(text: str) -> dict:
         "pan": pan, "phone": phone, "email": email, "reverse_charge": reverse_charge,
         "bank_name": bank_name, "account_last4": account[-4:] if account else None, "ifsc": ifsc,
         "rounded_off": money(rounded_off_raw), "taxable_amount": money(subtotal_raw), "tax_breakdown": tax_breakdown,
+        "po_total": money(po_total_raw),
     }
     def field_evidence(key, value):
         labels = {"invoice_number": r"\binv(?:oice)?\s*(?:no\.?|number|#)", "po_number": r"\b(?:p\.?o\.?|purchase\s*order|cust\.?\s*po)\b",
@@ -401,9 +407,10 @@ def extract_invoice(text: str) -> dict:
     fields = {"invoice_number":invoice_number, "po_number":po_number, "vendor":vendor, "gstin":gstin,
               "date":invoice_date, "total":total_value, "subtotal":money(subtotal_raw), "tax":tax_value}
     return {"invoice_number": invoice_number, "po_number": po_number, "vendor": vendor, "gstin": gstin,
+            "po_total": money(po_total_raw),
             "date": invoice_date, "total": total_value, "subtotal": money(subtotal_raw),
             "discount": money(discount_raw), "tax": tax_value, "details": details,
-            "line_items": line_items, "raw_text": clean, "document_type": classify_document(text),
+            "line_items": line_items, "raw_text": clean, "document_type": document_type,
             "field_metadata": {key: field_evidence(key, value) for key, value in fields.items() if value is not None}}
 
 def load_pos(path: Path) -> list[dict]:

@@ -175,6 +175,23 @@ Grand Total: 118.00""")
     assert inv["line_items"][0]["unit_price"] == 50.0
 
 
+def test_purchase_order_total_is_not_invoice_total():
+    text = """Hindalco Industries Limited
+PURCHASE ORDER (Domestic)
+Vendor: VIGIL SAFETY TECHNOLOGIES
+PO. Number: 13542310381
+Item Total Value
+6,080.00
+Total Purchase Order Value
+6,080.00
+"""
+    inv = processor.extract_invoice(text)
+    assert inv["document_type"] == "PURCHASE_ORDER"
+    assert inv["po_total"] == 6080.0
+    assert inv["total"] is None
+    assert inv["po_number"] == "13542310381"
+
+
 def test_seller_and_buyer_gstin_separate():
     seller, buyer = gstin(), gstin("27ABCDE1234F1Z")
     text = f"Vendor: Acme Supplies\nGSTIN: {seller}\nBill To GSTIN: {buyer}\nInvoice Number: INV-1\nPO Number: PO-1\nTotal: 1000"

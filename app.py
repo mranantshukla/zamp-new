@@ -110,12 +110,15 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         # Optional: reconcile OCR text before decisioning. Dataset labels are
         # intentionally unavailable here and unsupported proposals are dropped.
         ai_started = time.monotonic()
-        invoice, ai_extraction = reconcile_ocr(invoice, text, AI_RUNTIME_CONFIG)
+        if kind == "PURCHASE_ORDER":
+            ai_extraction = {"status": "SKIPPED", "accepted_fields": [], "reason": "Purchase order is not an invoice"}
+        else:
+            invoice, ai_extraction = reconcile_ocr(invoice, text, AI_RUNTIME_CONFIG)
         detected = sum(bool(invoice.get(k)) for k in ("invoice_number", "vendor", "po_number", "date", "total"))
         if ai_extraction["status"] == "COMPLETED":
             stage(rid, current, "COMPLETED", f"{len(ai_extraction['accepted_fields'])} OCR-backed field(s) accepted; {detected}/5 key fields detected; {time.monotonic()-ai_started:.2f}s")
-        elif ai_extraction["status"] == "NOT_CONFIGURED":
-            stage(rid, current, "SKIPPED", "No AI extraction model configured; deterministic OCR retained")
+        elif ai_extraction["status"] in ("NOT_CONFIGURED", "SKIPPED"):
+            stage(rid, current, "SKIPPED", ai_extraction.get("reason", "No AI extraction model configured; deterministic OCR retained"))
         else:
             stage(rid, current, "BLOCKED", "AI extraction unavailable; deterministic OCR retained")
         current = "Extraction validation"; stage(rid, current, "RUNNING")

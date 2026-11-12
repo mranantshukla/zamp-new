@@ -30,6 +30,16 @@ if os.getenv("RENDER") and (not os.getenv("DEMO_USERNAME") or not os.getenv("DEM
 storage.initialize()
 storage.recover_interrupted()
 
+# The secret is deliberately runtime-only: it is never sent back to the browser,
+# stored in run history, or committed to source control.  Environment variables
+# are the persistent deployment configuration; the dashboard form is useful for
+# a local demo session.
+AI_RUNTIME_CONFIG = {
+    "endpoint": os.getenv("AI_REVIEW_API_URL", "").strip(),
+    "model": os.getenv("AI_REVIEW_MODEL", "").strip(),
+    "api_key": os.getenv("AI_REVIEW_API_KEY", ""),
+}
+
 STAGE_NAMES = ["Document received", "PDF text / OCR", "Document classification", "Field extraction",
                "Extraction validation", "Vendor verification", "PO matching", "Financial validation",
                "Duplicate detection", "AP decision", "AI evidence review", "History persistence"]
@@ -107,7 +117,7 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         current = "History persistence"; stage(rid, current, "RUNNING")
         # Benchmark labels enter only after extraction and the AP decision.
         decision = storage.locked_decision(rid, invoice, ROOT / "samples" / "pos.csv", method)
-        ai_review = review_invoice(invoice, decision)
+        ai_review = review_invoice(invoice, decision, AI_RUNTIME_CONFIG)
         stage(rid, "AI evidence review", "COMPLETED", ai_review["recommendation"])
         storage.finish_run(rid, {**{k:v for k,v in storage.get_run(rid).items()
                                     if k not in ("run_id", "time", "created_at", "document_id", "source", "event_type", "status", "stages", "reviews")},
@@ -180,6 +190,34 @@ def clear_history():
     log.info("archived %s completed runs from visible history", count)
     return jsonify(archived=count, note="Audit, duplicate and PO balance records retained")
 
+@app.get("/api/ai/config")
+def ai_config_get():
+    """Expose non-secret AI configuration state for the settings panel."""
+    return jsonify(endpoint=AI_RUNTIME_CONFIG["endpoint"], model=AI_RUNTIME_CONFIG["model"],
+                   api_key_configured=bool(AI_RUNTIME_CONFIG["api_key"]),
+                   configured=all(AI_RUNTIME_CONFIG.values()))
+
+@app.post("/api/ai/config")
+def ai_config_set():
+    """Set optional advisory-model configuration for this running process only."""
+    data = request.get_json(silent=True) or {}
+    endpoint = str(data.get("endpoint") or "").strip()
+    model = str(data.get("model") or "").strip()
+    api_key = str(data.get("api_key") or "")
+    if endpoint and not endpoint.startswith(("https://", "http://")):
+        return jsonify(error="AI endpoint must start with http:// or https://"), 400
+    if len(endpoint) > 500 or len(model) > 200 or len(api_key) > 1000:
+        return jsonify(error="AI configuration value is too long"), 400
+    AI_RUNTIME_CONFIG["endpoint"] = endpoint
+    AI_RUNTIME_CONFIG["model"] = model
+    # Empty key means “leave the current runtime key unchanged”; this prevents
+    # a page refresh from accidentally deleting an environment-provided key.
+    if api_key:
+        AI_RUNTIME_CONFIG["api_key"] = api_key
+    return jsonify(saved=True, endpoint=endpoint, model=model,
+                   api_key_configured=bool(AI_RUNTIME_CONFIG["api_key"]),
+                   note="The key is retained only by this running server process.")
+
 @app.get("/api/runs/<rid>")
 def run_api(rid):
     row = storage.get_run(rid)
@@ -246,9 +284,10 @@ def index():
     css = css_path.read_text(encoding="utf-8")
     html = render_template_string(INDEX_HTML, csrf=session["csrf"], samples=samples, css=css)
     review_markup = "<section class='card' id='reviewqueue'><div class='section-heading'><div><span class='eyebrow'>WORK QUEUE</span><h2>Review queue</h2></div><span class='muted'>Human attention required</span></div><div id='reviewrows' class='timeline'><p class='muted'>No invoices currently require review.</p></div></section>"
-    html = html.replace("<section class='card' id='history'>", review_markup + "<section class='card' id='history'>", 1)
+    config_markup = """<section class='card' id='aiconfiguration'><div class='section-heading'><div><span class='eyebrow'>OPTIONAL AI REVIEW</span><h2>Model configuration</h2></div><span class='muted'>Advisory only</span></div><div class='config-grid'><label>OpenAI-compatible endpoint<input id='aiendpoint' type='url' placeholder='https://api.openai.com/v1/chat/completions'></label><label>Model<input id='aimodel' placeholder='e.g. gpt-4.1-mini'></label><label>API key<input id='aiapikey' type='password' autocomplete='new-password' placeholder='Stored only for this server session'></label></div><button id='saveaiconfig' class='button'>Save AI configuration</button><p id='aiconfigmessage' class='muted'>The model is a second opinion only; it cannot change the AP decision.</p></section>"""
+    html = html.replace("<section class='card' id='history'>", review_markup + config_markup + "<section class='card' id='history'>", 1)
     html = html.replace("<div id='reason'></div>", "<div id='reason'></div><section class='ai-review'><span class='eyebrow'>AI EVIDENCE REVIEW</span><div id='aiprofile' class='muted'>Waiting for automated evidence review.</div></section>", 1)
-    sidebar = """<aside class='side'><div class='logo'>zamp<span>.</span></div><div class='side-caption'>DIGITAL WORKFORCE</div><nav class='app-nav' aria-label='Main navigation'><a href='#home'><span>⌂</span>Home</a><a href='#history'><span>▤</span>My invoices</a><a href='#upload'><span>⌁</span>Scan &amp; upload</a><a href='#reviewqueue'><span>!</span>Review centre</a><a href='#history'><span>◷</span>Reports</a></nav><div class='side-footer'>AP Intelligence<br><b>Operational workspace</b></div></aside>"""
+    sidebar = """<aside class='side'><div class='logo'>zamp<span>.</span></div><div class='side-caption'>DIGITAL WORKFORCE</div><nav class='app-nav' aria-label='Main navigation'><a href='#home'><span>⌂</span>Home</a><a href='#history'><span>▤</span>My invoices</a><a href='#upload'><span>⌁</span>Scan &amp; upload</a><a href='#reviewqueue'><span>!</span>Review centre</a><a href='#history'><span>◷</span>Reports</a><a href='#aiconfiguration'><span>⚙</span>AI configuration</a></nav><div class='side-footer'>AP Intelligence<br><b>Operational workspace</b></div></aside>"""
     html = html.replace("<aside class='side'><div class='logo'>Z</div><a href='#upload'>◇</a><a href='#history'>◷</a></aside>", sidebar, 1)
     html = html.replace("<main class='content'>", "<main class='content' id='home'>", 1)
     hero = """<section class='hero'><div class='hero-copy'><span class='eyebrow'>ZAMP · AP INTELLIGENCE</span><h1>Let your digital<br>workforce run AP.</h1><p>Invoice capture, validation and exception handling — with people involved where judgement matters.</p><a class='hero-action' href='#upload'>Process an invoice <span>→</span></a></div><div class='hero-graphic' aria-hidden='true'><div class='orbit orbit-one'></div><div class='orbit orbit-two'></div><div class='node node-one'></div><div class='node node-two'></div><div class='node node-three'></div><div class='hero-label'>AUTONOMOUS<br>OPERATIONS</div></div></section>"""
@@ -258,16 +297,21 @@ def index():
     .side{background:#101010;color:#f3f0eb;padding:30px 20px;display:flex;flex-direction:column;gap:24px;position:sticky;top:0;height:100vh}.side .logo{color:#fff;font-size:25px;font-weight:900;letter-spacing:-1.8px;padding:0 10px}.side .logo span{color:#ff956b}.side-caption{font-size:9px;letter-spacing:1.7px;color:#8a8782;padding:0 10px}.app-nav{display:grid;gap:5px;margin-top:20px}.side .app-nav a{display:flex;align-items:center;gap:11px;padding:12px;border-radius:10px;color:#aaa6a0;font-size:13px;font-weight:700;text-decoration:none;transition:color .2s,background .2s}.side .app-nav a span{width:16px;text-align:center;font-size:16px}.side .app-nav a:hover{background:#23211f;color:#fff}.side-footer{margin-top:auto;border-top:1px solid #302e2b;padding:18px 10px 0;color:#817d77;font-size:11px;line-height:1.7}.side-footer b{color:#dad4cc;font-weight:600}
     .content{min-width:0;padding:25px clamp(18px,3vw,44px) 70px;max-width:1500px;width:100%;margin:0 auto}
     .hero{background:#111;color:#fff;border-radius:26px;padding:clamp(32px,4vw,64px);min-height:390px;display:grid;grid-template-columns:minmax(0,1.1fr) minmax(250px,.9fr);align-items:center;gap:20px;position:relative;overflow:hidden;margin-bottom:24px}.hero-copy{position:relative;z-index:2}.hero h1{font-size:clamp(42px,5vw,76px);letter-spacing:-4px;line-height:.93;margin:17px 0 20px;font-weight:800}.hero p{max-width:470px;color:#c7c1ba;font-size:15px;line-height:1.6}.hero .eyebrow{color:#ffab83}.hero-action{display:inline-flex;align-items:center;gap:24px;margin-top:22px;background:#f1eee8;color:#111;border-radius:100px;padding:12px 18px;text-decoration:none;font-size:12px;font-weight:800}.hero-action span{font-size:18px}.hero-graphic{min-height:280px;position:relative;background:radial-gradient(circle at 50% 50%,#fb9c7f 0%,#da7693 23%,#9f699f 44%,#252033 70%);border-radius:50%;aspect-ratio:1;justify-self:center;width:min(100%,330px);box-shadow:0 0 0 1px #ffffff22 inset}.orbit{position:absolute;border:1px solid #ffffff55;border-radius:50%;inset:16%;animation:orbit 9s linear infinite}.orbit-two{inset:31%;border-style:dashed;animation-direction:reverse;animation-duration:12s}.node{position:absolute;width:10px;height:10px;background:#fff;border-radius:50%;box-shadow:0 0 20px #fff}.node-one{top:19%;left:24%}.node-two{right:13%;bottom:30%;background:#ffcfad}.node-three{bottom:12%;left:36%;width:7px;height:7px}.hero-label{position:absolute;bottom:18%;right:-8%;font-size:9px;letter-spacing:1.5px;line-height:1.6;color:#fff;text-align:right}@keyframes orbit{to{transform:rotate(360deg)}}
-    .metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:24px}.metric{background:#fffdf9;border:1px solid #dedad3;border-radius:13px;padding:16px 18px;box-shadow:none;transition:transform .18s,border-color .18s}.metric:hover{transform:translateY(-2px);border-color:#aa9b91}.metric b{display:block;font-size:25px;margin-top:6px;color:#161616}.metric-label{font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:#78736d;font-weight:800}
+    .metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:24px}.metric{background:#fffdf9;border:1px solid #dedad3;border-radius:13px;padding:16px 18px;box-shadow:none;transition:transform .18s,border-color .18s}.metric:hover{transform:translateY(-2px);border-color:#aa9b91}.metric b{display:block;font-size:25px;margin-top:6px;color:#161616}.metric-label{font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:#78736d;font-weight:800}.config-grid{display:grid;grid-template-columns:1.5fr 1fr 1fr;gap:12px;margin:16px 0}.config-grid label{font-size:12px;font-weight:700;color:#554f49}.config-grid input{margin:6px 0 0}.config-grid+button{margin-top:3px}
     .grid{display:grid;grid-template-columns:minmax(300px,.9fr) minmax(330px,1.1fr);gap:18px;margin:0}.card{background:#fffdf9;border:1px solid #dedad3;border-radius:17px;padding:23px;box-shadow:none;margin-bottom:18px}.card h2{font-size:20px;letter-spacing:-.7px}.button{border-radius:9px;background:#151515;color:#fff;padding:12px 15px;transition:transform .16s,background .16s}.button:hover{background:#33302d;transform:translateY(-1px)}.activity{background:#151515!important;border-radius:12px!important;padding:18px!important;color:#f2eee9!important}.tablewrap{overflow-x:auto}.tablewrap table{min-width:100%}.badge.APPROVED{background:#e9f8ef;color:#14714b}.badge.REJECTED,.badge.FAILED{background:#ffe9ed;color:#b32643}.badge.PENDING_REVIEW{background:#fff3d6;color:#8a620e}.ai-review{margin:18px 0;padding:15px;border:1px solid #e2ddd5;border-left:3px solid #ec936a;border-radius:10px;background:#fcf7f1}.ai-review p{margin:7px 0}.preview{transition:transform .2s}.is-scanning .preview{animation:scanPulse 1.2s ease-in-out infinite}@keyframes scanPulse{50%{box-shadow:0 0 0 4px #d9798b33}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
-    @media(max-width:1000px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:740px){.shell{display:block}.side{height:auto;position:static;flex-direction:row;align-items:center;padding:10px 16px;gap:10px}.app-nav{display:flex;overflow:auto;margin:0}.side .app-nav a{white-space:nowrap;padding:8px}.side .app-nav a span{display:none}.content{padding:16px 14px 60px}.grid,.cols{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.card{padding:18px}}
+    @media(max-width:1000px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.config-grid{grid-template-columns:1fr 1fr}}@media(max-width:740px){.shell{display:block}.side{height:auto;position:static;flex-direction:row;align-items:center;padding:10px 16px;gap:10px}.app-nav{display:flex;overflow:auto;margin:0}.side .app-nav a{white-space:nowrap;padding:8px}.side .app-nav a span{display:none}.content{padding:16px 14px 60px}.grid,.cols,.config-grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.card{padding:18px}}
     """
     ai_ui = """<script>(() => { const original = window.renderRun; if (!original) return;
     window.renderRun = function(run) { original(run); const target = document.getElementById('aiprofile');
       if (!target) return; const review = run.ai_review; if (!review) { target.textContent = 'No AI evidence review is available for this historical run.'; return; }
       const flags = (review.flagged_checks || []).map(flag => `${flag.check}: ${flag.outcome}`).join(' · ');
-      target.innerHTML = `<b>${esc(review.recommendation)}</b><p>${esc(review.summary)}</p>${flags ? `<small>${esc(flags)}</small>` : ''}`;
-    }; })();</script>"""
+      const opinion = review.model_second_opinion || {}; const model = opinion.status === 'COMPLETED' ? ` · Model: ${opinion.model || 'configured'} — ${opinion.response?.summary || 'second opinion received'}` : (opinion.status === 'UNAVAILABLE' ? ` · Model unavailable: ${opinion.error}` : '');
+      target.innerHTML = `<b>${esc(review.recommendation)}</b><p>${esc(review.summary)}${esc(model)}</p>${flags ? `<small>${esc(flags)}</small>` : ''}`;
+    };
+    const endpoint = document.getElementById('aiendpoint'); if (!endpoint) return;
+    (async () => { try { const cfg = await (await fetch('/api/ai/config')).json(); endpoint.value=cfg.endpoint||''; document.getElementById('aimodel').value=cfg.model||''; document.getElementById('aiconfigmessage').textContent=cfg.api_key_configured ? 'A server-side key is configured. Enter a new key only to replace it for this session.' : 'The model is a second opinion only; it cannot change the AP decision.'; } catch (_) {} })();
+    document.getElementById('saveaiconfig').onclick = async () => { const message=document.getElementById('aiconfigmessage'); const response=await fetch('/api/ai/config',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({endpoint:endpoint.value,model:document.getElementById('aimodel').value,api_key:document.getElementById('aiapikey').value})}); const data=await response.json(); message.textContent=data.error || data.note || 'Configuration saved.'; if(response.ok) document.getElementById('aiapikey').value=''; };
+    })();</script>"""
     html = html.replace("</head>", "<style>" + ui_overrides + "</style></head>", 1)
     return html.replace("</body>", ai_ui + "</body>", 1)
 

@@ -7,11 +7,46 @@ enter the review.
 """
 from __future__ import annotations
 
+import json
+from urllib import request
+
 
 CRITICAL_FIELDS = ("invoice_number", "vendor", "po_number", "date", "total")
 
 
-def review_invoice(invoice: dict, decision) -> dict:
+def _model_second_opinion(invoice: dict, decision, config: dict) -> dict:
+    """Use an OpenAI-compatible endpoint only when an operator configured it.
+
+    Only structured fields and validation evidence are sent, never the source
+    document bytes or ground-truth dataset labels. The model response remains
+    advisory and is intentionally unable to alter the official AP decision.
+    """
+    endpoint, model, api_key = (config.get("endpoint") or "").strip(), (config.get("model") or "").strip(), config.get("api_key") or ""
+    if not (endpoint and model and api_key):
+        return {"status": "NOT_CONFIGURED"}
+    evidence = {
+        "invoice": {key: invoice.get(key) for key in ("invoice_number", "vendor", "gstin", "date", "po_number", "subtotal", "tax", "total")},
+        "field_metadata": invoice.get("field_metadata") or {},
+        "checks": getattr(decision, "checks", []),
+        "official_decision": decision.status,
+    }
+    payload = {"model": model, "temperature": 0,
+               "messages": [{"role": "system", "content": "You are an invoice evidence reviewer. Return concise JSON with keys summary, concerns, and recommendation. Recommendation may only be AUTO_APPROVE, CONFIRM_REJECTION, or ESCALATE_TO_HUMAN. Do not override the official decision."},
+                            {"role": "user", "content": json.dumps(evidence, default=str)}]}
+    try:
+        req = request.Request(endpoint, data=json.dumps(payload).encode(), method="POST",
+                              headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"})
+        with request.urlopen(req, timeout=20) as response:
+            data = json.loads(response.read().decode())
+        content = data["choices"][0]["message"]["content"]
+        if content.startswith("```"): content = content.strip("` \n").removeprefix("json\n")
+        result = json.loads(content)
+        return {"status": "COMPLETED", "model": model, "response": result}
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "model": model, "error": str(exc)[:180]}
+
+
+def review_invoice(invoice: dict, decision, config: dict | None = None) -> dict:
     metadata = invoice.get("field_metadata") or {}
     missing = [field for field in CRITICAL_FIELDS if not invoice.get(field)]
     low_evidence = [field for field in CRITICAL_FIELDS
@@ -38,7 +73,7 @@ def review_invoice(invoice: dict, decision) -> dict:
         if not parts: parts.append("Business or extraction evidence requires human assessment")
         summary = "; ".join(parts) + "."
 
-    return {
+    result = {
         "status": "COMPLETED",
         "recommendation": recommendation,
         "summary": summary,
@@ -47,3 +82,5 @@ def review_invoice(invoice: dict, decision) -> dict:
         "flagged_checks": flagged,
         "decision_preserved": status,
     }
+    result["model_second_opinion"] = _model_second_opinion(invoice, decision, config or {})
+    return result

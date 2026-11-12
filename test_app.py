@@ -19,6 +19,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "engine", engine)
     storage.initialize()
     monkeypatch.setattr(web, "ROOT", tmp_path)
+    monkeypatch.setattr(web, "AI_RUNTIME_CONFIG", {"endpoint": "", "model": "", "api_key": ""})
     (tmp_path / "samples").mkdir()
     (tmp_path / "samples" / "pos.csv").write_text(
         "po_number,vendor,po_amount,invoiced_to_date\nPO-1,Acme Supplies,1000,0\n", encoding="utf-8")
@@ -147,6 +148,21 @@ def test_ai_evidence_review_is_recorded_without_overriding_decision(client):
     pending = submit(client, pdf(invoice_text(number="AI-NEEDS-REVIEW", po="")))
     assert pending["status"] == "PENDING_REVIEW"
     assert pending["ai_review"]["recommendation"] == "ESCALATE_TO_HUMAN"
+
+
+def test_ai_configuration_masks_key_and_is_advisory(client):
+    with client.session_transaction() as sess: csrf = sess["csrf"]
+    saved = client.post("/api/ai/config", json={
+        "endpoint": "https://example.test/v1/chat/completions", "model": "review-model", "api_key": "top-secret"
+    }, headers={"X-CSRF-Token": csrf})
+    assert saved.status_code == 200
+    assert "top-secret" not in saved.get_data(as_text=True)
+    configured = client.get("/api/ai/config")
+    assert configured.status_code == 200
+    assert configured.json["endpoint"] == "https://example.test/v1/chat/completions"
+    assert configured.json["model"] == "review-model"
+    assert configured.json["api_key_configured"] is True
+    assert "top-secret" not in configured.get_data(as_text=True)
 
 
 def test_concurrent_duplicate_decision(client):

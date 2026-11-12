@@ -140,6 +140,18 @@ def test_image_pipeline_and_ocr_failure():
             processor.read_document(b"image", ".jpg")
 
 
+def test_selective_ocr_preprocessing_only_targets_low_contrast_images():
+    white = Image.new("RGB", (180, 80), "white")
+    high = BytesIO(); white.save(high, format="PNG")
+    assert processor._enhanced_ocr_candidate(high.getvalue()) is None
+    low = Image.new("RGB", (180, 80), (132, 132, 132))
+    drawing = ImageDraw.Draw(low)
+    drawing.rectangle((20, 20, 160, 60), fill=(145, 145, 145))
+    drawing.text((28, 30), "Invoice 100", fill=(156, 156, 156))
+    encoded = BytesIO(); low.save(encoded, format="PNG")
+    assert processor._enhanced_ocr_candidate(encoded.getvalue()) is not None
+
+
 def test_ocr_spaced_vendor_label_has_direct_evidence():
     inv = processor.extract_invoice("FICTIONAL DEMO DOCUMENT\nTAX INVOICE\nVe ndor. Acme Supplies\nInvoice Number: INV-1")
     assert inv["vendor"] == "Acme Supplies"

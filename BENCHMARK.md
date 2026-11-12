@@ -1,8 +1,8 @@
 # AjitRawat/invoice extraction benchmark
 
-Run on the 22 cached original images with RapidOCR and the current `extract_invoice` parser on 12 November 2026. Dataset labels were used only in `evaluate_dataset`, after extraction.
+Run on the 22 cached original images with RapidOCR and the current `extract_invoice` parser on 13 November 2026. Dataset labels were used only in `evaluate_dataset`, after extraction. The current OCR path first reads the original image; only low-contrast images receive a second, deskewed/denoised contrast candidate, and the higher-scoring OCR text is retained.
 
-- Images processed: 22/22; OCR exceptions: 0.
+- Images processed: 22/22; OCR exceptions: 0; elapsed time: 78.78 seconds (3.58 seconds per image).
 - Comparable labeled fields: 90.
 - Exact matches: 25/90 (27.8%) with the memory-limited OCR configuration.
 - Mismatches: 28; extraction missing: 37.

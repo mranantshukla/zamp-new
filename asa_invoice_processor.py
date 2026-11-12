@@ -23,6 +23,11 @@ try:
     from rapidocr_onnxruntime import RapidOCR
 except Exception:
     RapidOCR = None
+try:
+    import cv2
+    import numpy as np
+except Exception:
+    cv2 = np = None
 
 MONEY = r"(?:[$₹€£]\s*)?([0-9][0-9, ]*(?:\.\d{2})?)"
 OCR_LOCK = threading.Lock()
@@ -75,7 +80,49 @@ def extract_reference(lines, pattern):
 def _usable(text):
     return len(re.findall(r"[A-Za-z0-9]", text)) >= 30
 
-def _ocr_image(data):
+def _ocr_score(text: str) -> int:
+    """Rank candidate OCR output without inventing a confidence value."""
+    labels = len(re.findall(r"\b(?:invoice|vendor|supplier|total|gstin|purchase\s*order|p\.?o\.?)\b", text, re.I))
+    structured = len(re.findall(r"\b(?:\d{2}[A-Z0-9]{13}|[A-Z]{2,}[/-]\d+)\b", text, re.I))
+    return len(re.findall(r"[A-Za-z0-9]", text)) + labels * 40 + structured * 20
+
+
+def _enhanced_ocr_candidate(data: bytes) -> bytes | None:
+    """Create a conservative OCR candidate only for visibly weak images.
+
+    The source bytes always remain the first candidate. Denoising, contrast and
+    deskew are applied only when OpenCV can decode a low-contrast input; callers
+    compare both OCR outputs rather than assuming preprocessing helps.
+    """
+    if cv2 is None or np is None:
+        return None
+    image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return None
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    contrast = float(gray.std())
+    # A blank or near-blank page has no document signal to enhance.
+    if contrast < 2 or contrast >= 48:
+        return None
+    denoised = cv2.fastNlMeansDenoising(gray, None, 9, 7, 21)
+    enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(denoised)
+    # Deskew a mild scan skew. Extreme rotations are left to the OCR engine so
+    # that a noisy page cannot be made worse by a brittle geometric transform.
+    ink = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    points = cv2.findNonZero(ink)
+    if points is not None:
+        angle = cv2.minAreaRect(points)[-1]
+        angle = -(90 + angle) if angle < -45 else -angle
+        if 0.3 <= abs(angle) <= 12:
+            height, width = enhanced.shape
+            matrix = cv2.getRotationMatrix2D((width / 2, height / 2), angle, 1.0)
+            enhanced = cv2.warpAffine(enhanced, matrix, (width, height), flags=cv2.INTER_CUBIC,
+                                      borderMode=cv2.BORDER_REPLICATE)
+    ok, encoded = cv2.imencode(".png", enhanced)
+    return encoded.tobytes() if ok else None
+
+
+def _ocr_once(data: bytes) -> str:
     global OCR_ENGINE
     if RapidOCR is None:
         raise RuntimeError("RapidOCR is not installed")
@@ -89,6 +136,18 @@ def _ocr_image(data):
     if not _usable(text):
         raise RuntimeError("OCR returned no usable text")
     return text
+
+
+def _ocr_image(data):
+    original = _ocr_once(data)
+    enhanced = _enhanced_ocr_candidate(data)
+    if not enhanced:
+        return original
+    try:
+        improved = _ocr_once(enhanced)
+    except RuntimeError:
+        return original
+    return improved if _ocr_score(improved) > _ocr_score(original) else original
 
 def read_document(data: bytes, suffix: str):
     """Return text, method, and page count. Labels are never inputs here."""
@@ -107,7 +166,9 @@ def read_document(data: bytes, suffix: str):
                 raise RuntimeError("Scanned PDF rendering requires PyMuPDF")
             with fitz.open(stream=data, filetype="pdf") as document:
                 for i in scanned:
-                    pix = document[i].get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                    # 300 DPI preserves small invoice text; preprocessing only
+                    # runs after OCR comparison proves it is helpful.
+                    pix = document[i].get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72), alpha=False)
                     text_parts[i] = _ocr_image(pix.tobytes("png"))
         return "\n".join(text_parts), "pdf+ocr" if scanned else "pdf_text", len(pages)
     if suffix == ".txt":

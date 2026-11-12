@@ -48,6 +48,18 @@ def initialize():
         if conn.execute(select(migrations.c.version)).first() is None:
             conn.execute(insert(migrations).values(version=1))
 
+def recover_interrupted():
+    """Close runs left active by a terminated single-worker process."""
+    with engine.begin() as conn:
+        for row in conn.execute(select(runs).where(runs.c.status == "RUNNING")).mappings():
+            payload = json.loads(row["payload"] or "{}")
+            payload.update(error="Worker stopped before processing completed",
+                           reasons=["Processing interrupted; resubmit for review"])
+            conn.execute(update(runs).where(runs.c.id == row["id"]).values(
+                status="FAILED", payload=json.dumps(payload)))
+            conn.execute(insert(stages).values(run_id=row["id"], stage="Processing interrupted", status="FAILED",
+                                               detail="Worker stopped before processing completed", at=now()))
+
 def create_run(source, event_type, document=None, mime=None):
     rid = str(uuid.uuid4()); did = str(uuid.uuid4()) if document is not None else None
     with engine.begin() as conn:

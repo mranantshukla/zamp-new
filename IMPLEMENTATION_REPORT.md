@@ -14,4 +14,4 @@ The active flow was `asa_dashboard.py` → `read_document` / `extract_invoice` /
 
 ## Risks
 
-The 22-image field benchmark remains 26.7%. PostgreSQL concurrency and Render operation are unverified without a live database and deployment. Future schema changes need a migration framework beyond version-1 initialization. This case study is not a production AP control system.
+The 22-image field benchmark is 27.8% after the OCR memory change. Live PostgreSQL persistence is verified by PDF upload; concurrent PostgreSQL approvals remain untested. Future schema changes need a migration framework beyond version-1 initialization. This case study is not a production AP control system.

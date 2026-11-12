@@ -5,7 +5,7 @@ Usage:
   python asa_invoice_processor.py --invoice samples/invoice_duplicate.txt --po-data samples/pos.csv --history samples/history.json
 """
 from __future__ import annotations
-import argparse, csv, json, re
+import argparse, csv, json, re, threading
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +25,8 @@ except Exception:
     RapidOCR = None
 
 MONEY = r"(?:[$₹€£]\s*)?([0-9][0-9, ]*(?:\.\d{2})?)"
+OCR_LOCK = threading.Lock()
+OCR_ENGINE = None
 
 @dataclass
 class Decision:
@@ -74,9 +76,15 @@ def _usable(text):
     return len(re.findall(r"[A-Za-z0-9]", text)) >= 30
 
 def _ocr_image(data):
+    global OCR_ENGINE
     if RapidOCR is None:
         raise RuntimeError("RapidOCR is not installed")
-    result, _ = RapidOCR()(data)
+    # Reuse models and serialize inference on memory-limited demo instances.
+    with OCR_LOCK:
+        if OCR_ENGINE is None:
+            OCR_ENGINE = RapidOCR(use_angle_cls=False, det_model_path=None, det_limit_type="max",
+                                  det_limit_side_len=1280, rec_model_path=None, rec_batch_num=1)
+        result, _ = OCR_ENGINE(data)
     text = "\n".join(item[1] for item in (result or [])).strip()
     if not _usable(text):
         raise RuntimeError("OCR returned no usable text")

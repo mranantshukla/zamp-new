@@ -27,6 +27,7 @@ log = logging.getLogger("asa")
 if os.getenv("RENDER") and (not os.getenv("DEMO_USERNAME") or not os.getenv("DEMO_PASSWORD") or not os.getenv("APP_SECRET")):
     raise RuntimeError("APP_SECRET, DEMO_USERNAME and DEMO_PASSWORD are required in deployment")
 storage.initialize()
+storage.recover_interrupted()
 
 STAGE_NAMES = ["Document received", "PDF text / OCR", "Document classification", "Field extraction",
                "Extraction validation", "Vendor verification", "PO matching", "Financial validation",

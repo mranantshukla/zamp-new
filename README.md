@@ -63,4 +63,4 @@ Optional, idempotent legacy JSON import: set `DATABASE_URL`, then run `python mi
 
 ## Known limits
 
-The heuristic extractor remains weak on real bills: the original 22-image AjitRawat benchmark is **24/90 exact comparable fields (26.7%)**. OCR evidence grades are structural, not calibrated confidence. GST checks do not establish tax-law compliance. Abrupt worker death may leave a run `RUNNING`. Schema version 1 is initialized additively; future changes need a migration framework. Live PostgreSQL and Render operation require separate verification. Render free web services spin down and free Postgres expires after 30 days.
+The heuristic extractor remains weak on real bills: the current 22-image AjitRawat benchmark is **25/90 exact comparable fields (27.8%)**. OCR evidence grades are structural, not calibrated confidence. GST checks do not establish tax-law compliance. Interrupted runs are marked `FAILED` after a worker restart. Schema version 1 is initialized additively; future changes need a migration framework. Render free web services spin down and free Postgres expires after 30 days.

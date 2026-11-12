@@ -12,6 +12,6 @@
 
 **4:00–4:40** Open a run and record reviewer, note and correction. Show the original automated decision remains. Demonstrate filters and Clear history archival if useful.
 
-**4:40–5:00** State the benchmark limit: 24/90 exact fields on 22 original dataset images. Labels are evaluation-only.
+**4:40–5:00** State the benchmark limit: 25/90 exact fields on 22 original dataset images. Labels are evaluation-only.
 
 Use a fresh database or distinct invoice numbers before recording; existing approvals intentionally affect later decisions.

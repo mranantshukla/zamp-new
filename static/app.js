@@ -94,6 +94,79 @@
   paintName();
   const setCrumb = (html) => { $('#crumb').innerHTML = html; };
 
+  /* ---------- local, read-only workspace guide ---------- */
+  const guidePanel = $('#guide-panel'), guideMessages = $('#guide-messages'), guideInput = $('#guide-input');
+  const guideOpen = (open) => {
+    guidePanel.hidden = !open;
+    $('#guide-launch').setAttribute('aria-expanded', String(open));
+    if (open) guideInput.focus(); else $('#guide-launch').focus();
+  };
+  $('#guide-launch').addEventListener('click', () => guideOpen(guidePanel.hidden));
+  $('#guide-close').addEventListener('click', () => guideOpen(false));
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !guidePanel.hidden) guideOpen(false); });
+  function guideMessage(text, who = 'assistant', href = '') {
+    const node = document.createElement('div'); node.className = `guide-message ${who}`; node.textContent = text;
+    if (href) { const link = document.createElement('a'); link.href = href; link.className = 'guide-link'; link.textContent = 'Open in Zamp →'; node.append(link); }
+    guideMessages.append(node); guideMessages.scrollTop = guideMessages.scrollHeight;
+  }
+  async function answerGuide(raw) {
+    const q = raw.trim(), lower = q.toLowerCase();
+    if (/\b(why|held|hold|rejected|flagged)\b/.test(lower) && /\b(invoice|bill|supplier|vendor|\d{3,})\b/.test(lower)) {
+      const term = q.replace(/\b(why|was|is|the|this|that|invoice|invoices|bill|bills|supplier|vendor|held|hold|rejected|flagged|for|about|me|please|explain)\b/gi, ' ').trim();
+      if (term.length > 1) {
+        const rows = await api(`/api/runs?q=${encodeURIComponent(term)}&limit=5`);
+        if (rows.length) {
+          const r = await api(`/api/runs/${encodeURIComponent(rows[0].run_id)}`);
+          const reasons = r.reasons || r.decision?.reasons || [];
+          const reasonText = reasons.length ? reasons.slice(0, 3).map(human).join('; ') : (r.status === 'APPROVED' ? 'No blocking check remains; it was approved by the recorded workflow.' : 'The run does not include a recorded blocking reason.');
+          return { text: `${title(r)}${r.invoice_number ? ` · ${r.invoice_number}` : ''}: ${reasonText}`, href: `#/invoice/${encodeURIComponent(r.run_id)}?from=assistant` };
+        }
+      }
+    }
+    if (/\b(what|anything|items|invoices|bills|waiting|attention|queue|pending|review|due)\b/.test(lower)) {
+      const rows = await api('/api/runs?open=1&limit=200');
+      const open = rows.filter((r) => r.event_type !== 'dataset_evaluation').sort(byDue);
+      if (!open.length) return { text: 'There are no business invoices waiting for review right now.', href: '#/review' };
+      const first = open[0], why = first.reasons?.[0] || first.review_route?.reason || 'Needs a review';
+      return { text: `${plural(open.length, 'invoice')} ${open.length === 1 ? 'is' : 'are'} waiting for a decision. The next due item is ${title(first)}: ${human(why)}.`, href: `#/invoice/${encodeURIComponent(first.run_id)}?from=assistant` };
+    }
+    if (/\b(approved|approval|automation|automatic|processed|performance|stats|summary|count|how many|value|money)\b/.test(lower)) {
+      const s = await api('/api/analytics/summary?scope=business'), m = s.invoice_metrics;
+      return { text: `Across ${plural(m.invoices, 'business invoice')}: ${m.approved} approved, ${m.pending} waiting for review, and ${m.rejected} rejected. ${m.touchless} were approved automatically (${pct(s.touchless_rate)} of decided invoices). The rejected value is a recorded invoice total, not guaranteed savings.`, href: '#/' };
+    }
+    if (/\b(check|checks|rule|rules|held|hold|why|reason|flag|issue|exception)\b/.test(lower)) {
+      const hint = /ocr|read|scan|image/.test(lower) ? 'Reading checks compare extracted fields with document evidence. OCR is optional; the image reader can still extract invoice details.'
+        : /vendor|supplier/.test(lower) ? 'Supplier checks compare the extracted supplier identity with the supplier master. A mismatch or unknown supplier can route an invoice for review.'
+        : /duplicate/.test(lower) ? 'Duplicate checks compare invoice identity and supplier details with prior records. A possible duplicate is routed for a person to inspect.'
+        : 'Checks compare invoice details with source evidence, supplier records, purchase orders and the ledger. Material mismatches go to Exceptions; a reviewer makes the final decision.';
+      return { text: `${hint} Zamp records evidence and does not send payments.`, href: '#/how' };
+    }
+    if (/\b(upload|bring in|new invoice|add invoice)\b/.test(lower)) return { text: 'You can upload PDF, PNG or JPEG invoices from Bring in invoices. OCR can be enabled there when you want it.', href: '#/upload' };
+    if (/\b(supplier|vendor|purchase order|\bpo\b|ledger|master)\b/.test(lower)) return { text: 'Supplier records and verification are under Suppliers; purchase orders and ledger records are under Orders & ledger.', href: /supplier|vendor/.test(lower) ? '#/vendors' : '#/data' };
+    if (/\b(invoice|bill|find|search|number)\b/.test(lower)) {
+      const term = q.replace(/\b(show|find|search|open|invoice|invoices|bill|bills|where is|where are|for|about|me|my)\b/gi, ' ').trim();
+      if (term.length > 1) {
+        const rows = await api(`/api/runs?q=${encodeURIComponent(term)}&limit=5`);
+        if (rows.length) {
+          const r = rows[0];
+          return { text: `${rows.length > 1 ? `I found ${rows.length} matching records. The closest match is ` : 'I found '}${title(r)}${r.invoice_number ? ` · ${r.invoice_number}` : ''}${r.total != null ? ` · ${money(r.total)}` : ''}.`, href: `#/invoice/${encodeURIComponent(r.run_id)}?from=assistant` };
+        }
+        return { text: `I couldn’t find a workspace record matching “${term}”. Try the main search for supplier, invoice number or PO.`, href: '#/invoices' };
+      }
+      return { text: 'Open All invoices to browse the records, or use the search at the top to find a supplier, invoice number or PO.', href: '#/invoices' };
+    }
+    return { text: 'I can help with the review queue, approval counts, invoice checks, suppliers, orders and uploads. Try one of the suggested questions, or use the top search to locate a record.', href: '#/how' };
+  }
+  async function submitGuide(q) {
+    if (!q.trim()) return;
+    guideMessage(q, 'user'); guideInput.value = ''; guideInput.disabled = true;
+    try { const answer = await answerGuide(q); guideMessage(answer.text, 'assistant', answer.href); }
+    catch (err) { guideMessage(`I couldn’t load that workspace information (${err.message}). You can use the navigation or try again.`, 'assistant'); }
+    finally { guideInput.disabled = false; guideInput.focus(); }
+  }
+  $('#guide-form').addEventListener('submit', (e) => { e.preventDefault(); submitGuide(guideInput.value); });
+  $$('#guide-prompts button').forEach((b) => b.addEventListener('click', () => submitGuide(b.textContent)));
+
   /* ---------- outcome vocabulary ---------- */
   const NON_INVOICE = (r) => (r.document_routing?.status || 'INVOICE_AP_WORKFLOW') === 'NON_INVOICE';
   function outcome(r) {
@@ -216,6 +289,7 @@
     setCrumb('<b>Today</b>');
     const im = s.invoice_metrics;
     const scope = _params.get('scope') === 'business' ? 'business' : 'all';
+    const visibleRecent = recent.filter((r) => scope === 'all' || r.event_type !== 'dataset_evaluation');
     const queue = queueRes.filter(r => scope === "all" || r.event_type !== "dataset_evaluation").sort(byDue);
     const hour = new Date().getHours();
     const hello = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
@@ -244,11 +318,12 @@
     view.innerHTML = `
       <div class="overview-toolbar"><span class="kicker">Overview · visible records</span><label>Show <select id="overview-scope"><option value="all" ${scope === 'all' ? 'selected' : ''}>All documents, including dataset</option><option value="business" ${scope === 'business' ? 'selected' : ''}>Business invoices only</option></select></label><button class="btn btn-sm" id="refresh-overview">Refresh</button></div>
       <p class="motto"><svg viewBox="0 0 48 24" aria-hidden="true"><path d="M24 12C28 6 34 4.5 39 7.5C44 10.5 43.5 17.5 38 19.5C32.5 21.5 28 17 24 12C20 7 15.5 2.5 10 4.5C4.5 6.5 4 13.5 9 16.5C14 19.5 20 18 24 12Z" stroke="url(#infgrad)" stroke-width="3.6"/></svg><span>The potential is always infinite.</span></p>
-      <section class="greeting"><div><span class="kicker">${esc(new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' }))}</span>
+      <section class="greeting dashboard-hero"><div><span class="kicker">${esc(new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' }))} · ${scope === 'business' ? 'Business view' : 'All records'}</span>
         <h1>${hello}${name ? `, ${esc(name)}` : ''}.</h1><p>${brief}</p></div>
-        <div class="actions">${queue.length ? `<a class="btn btn-primary" href="#/review">Work the exceptions</a><a class="btn" href="#/upload">Bring in invoices</a>` : `<a class="btn btn-primary" href="#/upload">Bring in invoices</a>`}</div></section>
+        <div class="actions">${queue.length ? `<a class="btn btn-primary" href="#/review">Review ${queue.length} ${queue.length === 1 ? 'exception' : 'exceptions'}</a><a class="btn" href="#/upload">New invoice</a>` : `<a class="btn btn-primary" href="#/upload">Bring in invoices</a>`}<button class="btn btn-ghost" type="button" data-open-guide>Ask Zamp</button></div></section>
 
-      <div class="overview-kpis"><a href="#/invoices"><small>Documents received</small><b>${s.documents}</b><small>${im.non_invoices} filed for reference</small></a><a href="#/invoices"><small>Approved</small><b class="ok">${im.approved}</b><small>${pct(s.touchless_rate)} handled automatically</small></a><a href="#/review"><small>Needs review</small><b class="warn">${im.pending}</b><small>Only blocking issues</small></a><a href="#/invoices"><small>Typical processing</small><b>${secs(s.processing_seconds.median)}</b><small>Current visible records</small></a></div>
+      <div class="overview-section-title"><div><span class="kicker">At a glance</span><h2>Current workload</h2></div><span class="muted small">${scope === 'all' && s.dataset_documents ? `${s.dataset_documents} public dataset runs included` : 'Live workspace totals'}</span></div>
+      <div class="overview-kpis"><a href="#/invoices"><small>Documents received</small><b>${s.documents}</b><small>${im.non_invoices} filed for reference</small></a><a href="#/invoices"><small>Approved</small><b class="ok">${im.approved}</b><small>${pct(s.touchless_rate)} handled automatically</small></a><a href="#/review"><small>Needs review</small><b class="warn">${im.pending}</b><small>Material issues for a person</small></a><a href="#/invoices"><small>Typical processing</small><b>${secs(s.processing_seconds.median)}</b><small>Median · visible records</small></a></div>
       <section class="panel"><div class="panel-head"><div><h2>Document flow</h2><p>${s.dataset_documents ? `${s.dataset_documents} dataset runs included · excluded from the payment ledger` : "Current business invoices"}</p></div><a class="btn btn-sm btn-ghost" href="#/invoices">All invoices</a></div>
         <div class="flow">
           <div class="flow-step"><small>Received</small><b>${s.documents}</b><small>documents</small></div>
@@ -263,7 +338,7 @@
           <section class="panel"><div class="panel-head"><div><h2>Volume</h2><p>Last 14 days · solid: everything received · dashed: went straight through</p></div></div>
             <div class="panel-body">${areaChart(days)}<div class="axis"><span>${esc(new Date(days[0].key).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }))}</span><span>Today · ${days[13].total}</span></div></div></section>
           <section class="panel"><div class="panel-head"><div><h2>Latest activity</h2><p>Newest first</p></div><a class="btn btn-sm btn-ghost" href="#/invoices">See all</a></div>
-            ${recent.length ? `<div class="feed">${recent.map((r) => { const o = outcome(r); return `<a href="#/invoice/${esc(r.run_id)}?from=overview"><span class="glyph ${o.tone}">${o.g}</span><span><b>${esc(title(r))} · ${money(r.total)}</b><small>${esc(o.label)} · ${esc(nextStep(r))}${r.invoice_number ? ` · ${esc(r.invoice_number)}` : ''}</small></span><span class="when">${esc(ago(r.time))}</span></a>`; }).join('')}</div>`
+            ${visibleRecent.length ? `<div class="feed">${visibleRecent.map((r) => { const o = outcome(r); return `<a href="#/invoice/${esc(r.run_id)}?from=overview"><span class="glyph ${o.tone}">${o.g}</span><span><b>${esc(title(r))} · ${money(r.total)}</b><small>${esc(o.label)} · ${esc(nextStep(r))}${r.invoice_number ? ` · ${esc(r.invoice_number)}` : ''}</small></span><span class="when">${esc(ago(r.time))}</span></a>`; }).join('')}</div>`
               : '<div class="empty"><h3>Quiet so far</h3><p>Documents you bring in appear here as they are read and decided.</p><a class="btn" href="#/upload">Bring in invoices</a></div>'}</section>
         </div>
         <div class="stack-lg">
@@ -294,6 +369,7 @@
         <section class="panel"><div class="panel-head"><div><h2>Upcoming payments</h2><p>Approved invoices by due date</p></div></div><div class="panel-body"><div class="calendar">${s.aging.map((a) => `<div class="${a.bucket === 'Overdue' && a.count ? 'hot' : ''}"><small>${esc(a.bucket.replace('Due in ', ''))}</small><b>${a.count}</b><small>${moneyShort(a.value)}</small></div>`).join('')}</div></div></section>
       </div>`;
     $('#overview-scope').addEventListener('change', (event) => go(`#/?scope=${event.target.value}`));
+    $$('[data-open-guide]').forEach((b) => b.addEventListener('click', () => guideOpen(true)));
     $('#refresh-overview').addEventListener('click', () => overviewPage(_args, _params, alive));
     if (overviewTimer) clearTimeout(overviewTimer);
     overviewTimer = setTimeout(() => { if (alive() && !document.hidden) overviewPage(_args, _params, alive); }, 15000);

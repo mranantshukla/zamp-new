@@ -392,13 +392,14 @@ def test_failed_ocr_and_ai_never_auto_approves(client, monkeypatch):
     assert submit(client, pdf(invoice_text()))["status"] == "FAILED"
 
 
-def test_ai_vision_sends_page_images_and_reads_json(monkeypatch):
+@pytest.mark.parametrize("list_response", [False, True])
+def test_ai_vision_sends_page_images_and_reads_json(monkeypatch, list_response):
     captured = []
     class Response:
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def read(self, *args):
-            return json.dumps({"choices": [{"message": {"content": json.dumps({"text": invoice_text(), "bill_kind": "tax_invoice", "already_paid": False})}}]}).encode()
+            return json.dumps({"choices": [{"message": {"content": json.dumps([{"text": invoice_text(), "bill_kind": "tax_invoice", "already_paid": False}] if list_response else {"text": invoice_text(), "bill_kind": "tax_invoice", "already_paid": False})}}]}).encode()
     def open_request(req, timeout):
         captured.append(json.loads(req.data))
         return Response()

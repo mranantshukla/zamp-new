@@ -134,6 +134,14 @@ def read_document_with_ai(raw: bytes, suffix: str, config: dict) -> dict:
         value = body["choices"][0]["message"]["content"].strip()
         if value.startswith("```"): value = value.strip("` \n").removeprefix("json\n")
         parsed = json.loads(value)
+        if isinstance(parsed, list):
+            if not parsed or not all(isinstance(item, dict) and isinstance(item.get("text"), str) for item in parsed):
+                raise ValueError("AI returned an unsupported list instead of document text")
+            kinds = {item.get("bill_kind", "tax_invoice") for item in parsed}
+            parsed = {"text": "\n".join(item["text"] for item in parsed),
+                      "bill_kind": next(iter(kinds)) if len(kinds) == 1 else "tax_invoice",
+                      "already_paid": all(item.get("already_paid") is True for item in parsed)}
+        if not isinstance(parsed, dict): raise ValueError("AI response must contain document text")
         text = parsed.get("text")
         if not isinstance(text, str) or not text.strip(): raise ValueError("AI returned no document text")
         return {"status": "COMPLETED", "text": text[:50000], "pages": len(images), "model": config["model"],

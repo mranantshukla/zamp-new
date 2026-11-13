@@ -68,7 +68,7 @@ INDEXES = (Index("ix_runs_created_at", runs.c.created_at), Index("ix_runs_status
            Index("ix_runs_vendor_key", runs.c.vendor_key), Index("ix_runs_po_key", runs.c.po_key),
            Index("ix_stages_run_id", stages.c.run_id, stages.c.id), Index("ix_reviews_run_id", reviews.c.run_id),
            Index("ix_runs_route_team", runs.c.route_team))
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 def now(): return datetime.now(timezone.utc)
 
@@ -124,6 +124,13 @@ def initialize():
                 values = summary_values(json.loads(row["payload"] or "{}"), row["status"])
                 conn.execute(update(runs).where(runs.c.id == row["id"]).values(**{k: values[k] for k in derived}))
         for target in range(version + 1, SCHEMA_VERSION + 1):
+            if target == 4:
+                # One-time cleanup of demo trials: the visible log is the
+                # public dataset, while underlying audit records remain intact.
+                conn.execute(update(runs).where(runs.c.event_type != "dataset_evaluation")
+                             .values(archived=1))
+                conn.execute(update(runs).where(runs.c.event_type == "dataset_evaluation")
+                             .values(archived=0))
             conn.execute(insert(migrations).values(version=target))
         for index in INDEXES:
             index.create(conn, checkfirst=True)

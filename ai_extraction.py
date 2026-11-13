@@ -38,7 +38,7 @@ def _call_model(text: str, config: dict) -> dict:
     try:
         req = request.Request(endpoint, data=json.dumps(payload).encode(), method="POST",
                               headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"})
-        with request.urlopen(req, timeout=float(os.getenv("AI_REQUEST_TIMEOUT", "12"))) as response:
+        with request.urlopen(req, timeout=max(30, min(60, float(os.getenv("AI_REQUEST_TIMEOUT", "30"))))) as response:
             response_data = json.loads(response.read().decode())
         content = response_data["choices"][0]["message"]["content"].strip()
         if content.startswith("```"):
@@ -129,7 +129,7 @@ def read_document_with_ai(raw: bytes, suffix: str, config: dict) -> dict:
                    "messages": [{"role": "user", "content": content}]}
         req = request.Request(config["endpoint"], data=json.dumps(payload).encode(), method="POST",
                               headers={"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"})
-        with request.urlopen(req, timeout=float(os.getenv("AI_REQUEST_TIMEOUT", "12"))) as response:
+        with request.urlopen(req, timeout=max(30, min(60, float(os.getenv("AI_REQUEST_TIMEOUT", "30"))))) as response:
             body = json.loads(response.read(1000000).decode())
         value = body["choices"][0]["message"]["content"].strip()
         if value.startswith("```"): value = value.strip("` \n").removeprefix("json\n")

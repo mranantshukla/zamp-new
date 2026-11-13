@@ -32,4 +32,4 @@ services:
       - key: AI_REVIEW_API_KEY
         sync: false
       - key: AI_REQUEST_TIMEOUT
-        value: "12"
+        value: "30"

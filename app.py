@@ -129,7 +129,7 @@ def login():
     if request.method == "POST":
         key = request.remote_addr or "unknown"
         if _login_blocked(key):
-            return render_template_string(LOGIN_HTML, error="Too many failed attempts. Try again in a few minutes."), 429
+            return render_template_string(LOGIN_HTML, error="Too many failed attempts. Try again in a few minutes.", demo_username=os.getenv("DEMO_USERNAME", "")), 429
         user = os.getenv("DEMO_USERNAME", "")
         password = os.getenv("DEMO_PASSWORD", "")
         if user and password and hmac.compare_digest(request.form.get("username", ""), user) and hmac.compare_digest(request.form.get("password", ""), password):
@@ -139,8 +139,8 @@ def login():
             with login_lock: login_failures.pop(key, None)
             return redirect(url_for("index"))
         with login_lock: login_failures[key].append(time.monotonic())
-        return render_template_string(LOGIN_HTML, error="Invalid credentials"), 401
-    return render_template_string(LOGIN_HTML, error="")
+        return render_template_string(LOGIN_HTML, error="Invalid credentials", demo_username=user), 401
+    return render_template_string(LOGIN_HTML, error="", demo_username=os.getenv("DEMO_USERNAME", ""))
 
 @app.post("/logout")
 def logout():
@@ -784,7 +784,14 @@ LOGIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta
 <h1>Welcome back</h1><p class="muted">Sign in to pick up today's invoices and exceptions.</p>
 <form method="post" class="stack"><label>Username<input name="username" autocomplete="username" required autofocus></label>
 <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
-<button class="btn btn-primary">Sign in</button></form>{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}</main></body></html>"""
+<button class="btn btn-primary">Sign in</button></form>
+{% if demo_username %}<button class="btn btn-ghost" type="button" id="demo-shortcut">Demo mode</button>
+<p class="muted">Use the demo account, then enter its password.</p>{% endif %}
+{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}</main>
+{% if demo_username %}<script>document.getElementById('demo-shortcut').addEventListener('click', function () {
+  document.querySelector('input[name="username"]').value = {{ demo_username|tojson }};
+  document.querySelector('input[name="password"]').focus();
+});</script>{% endif %}</body></html>"""
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "8766")), threaded=True)

@@ -10,6 +10,9 @@ import os
 
 # Plain-language names for decision checks, shown in the UI and audit views.
 CHECK_LABELS = {
+    "amount_readable": "Readable positive total",
+    "payee_identified": "Seller identified",
+    "approval_authority": "Within approval authority",
     "payment_change": "Changed payment details verified independently",
     "required_fields": "All key details are present",
     "ocr_field_evidence": "Each detail sits next to its printed label",

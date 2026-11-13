@@ -587,6 +587,14 @@
       const passed = checks.filter((c) => c.outcome === 'VERIFIED_PASS');
       const checkRow = (c) => { const t = c.outcome === 'VERIFIED_PASS' ? 'ok' : c.outcome === 'CONFIRMED_VIOLATION' ? 'bad' : 'warn';
         return `<div class="check"><span class="g ${t}">${t === 'ok' ? '✓' : t === 'bad' ? '×' : '!'}</span><div><b>${esc(m.checks[c.check] || c.check)}</b><small>${esc(human(c.detail))}</small>${c.outcome !== 'VERIFIED_PASS' ? issueTick(c) : ''}</div></div>`; };
+      const flowNode = (name) => {
+        const st = latest[name] || { status: 'PENDING', detail: 'Waiting to start' };
+        const done = ['COMPLETED', 'SKIPPED'].includes(st.status);
+        const symbol = st.status === 'COMPLETED' ? '✓' : st.status === 'RUNNING' ? '◉' : st.status === 'SKIPPED' ? '↪' : ['BLOCKED', 'FAILED'].includes(st.status) ? '!' : '○';
+        return `<div class="flow-step ${esc(st.status)}"><div class="flow-edge" role="progressbar" aria-label="${esc(name)}: ${esc(st.status.toLowerCase())}" ${done ? 'aria-valuenow="100" aria-valuemin="0" aria-valuemax="100"' : st.status === 'PENDING' ? 'aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"' : ''}><i></i></div><div class="flow-card"><span class="flow-symbol">${symbol}</span><div><b>${esc(name)}</b><span class="flow-state">${esc(st.status.toLowerCase().replace('_', ' '))}</span><small>${esc(human(st.detail || 'Waiting to start'))}</small></div></div></div>`;
+      };
+      const readerStages = ['OCR reader', 'AI image reader'];
+      const graphTimeline = `<div class="flow-graph" aria-label="Document processing flow">${flowNode('Document received')}<div class="flow-caption">Read in parallel · first usable result continues</div><div class="flow-branches">${readerStages.map(flowNode).join('')}</div><div class="flow-caption">↓ Results join → bill checks</div>${m.stages.filter((n) => n !== 'Document received' && !readerStages.includes(n)).map(flowNode).join('')}</div>`;
       const fm = inv.field_metadata || {};
       const t0 = r.stages?.[0]?.at ? new Date(r.stages[0].at).getTime() : 0;
       const outcomeWord = { APPROVED_BY_REVIEWER: 'Approved', REJECTED_BY_REVIEWER: 'Rejected', VERIFIED: 'Note', NEEDS_CORRECTION: 'Correction' };
@@ -602,9 +610,7 @@
             const value = editing ? `<input data-field="${k}" value="${esc(v ?? '')}" ${MONEY_FIELDS.has(k) ? 'inputmode="decimal"' : ''} aria-label="${l}">` : (MONEY_FIELDS.has(k) ? money(v) : dash(v));
             return `<tr><td>${l}</td><td>${value}${!editing && v != null ? `<div class="ev">${esc(RELIABILITY[mt.reliability] || 'no evidence')}${mt.evidence ? ` — “${esc(String(mt.evidence).slice(0, 120))}”` : ''}</div>` : ''}</td></tr>`; }).join('')}</tbody></table>
           ${(inv.line_items || []).length && !editing ? `<p class="sublabel">${plural(inv.line_items.length, 'line')}</p><ul class="small" style="margin:0;padding-left:18px">${inv.line_items.map((li) => `<li>${esc(li.description)}</li>`).join('')}</ul>` : ''}`,
-        timeline: `<div class="rail">${m.stages.map((n, i) => { const st = latest[n] || { status: 'PENDING', detail: 'not started' };
-            return `<div class="rail-step ${esc(st.status)}"><span class="pt">${st.status === 'COMPLETED' ? '✓' : st.status === 'BLOCKED' ? '!' : st.status === 'FAILED' ? '×' : i + 1}</span><div><b>${esc(n)}</b><small>${esc(human(st.detail || st.status.toLowerCase()))}</small></div><span class="t">${st.at && t0 ? `${((new Date(st.at).getTime() - t0) / 1000).toFixed(2)}s` : ''}</span></div>`; }).join('')}</div>
-          ${r.timings ? `<p class="muted small">Total ${secs(r.timings.total_seconds)}${r.ocr_cache_hit ? ' · text reused from an identical earlier file' : ''}</p>` : ''}`,
+        timeline: `${graphTimeline}${r.timings ? `<p class="muted small">Total ${secs(r.timings.total_seconds)}</p>` : ''}`,
         activity: `<div class="log">${(r.reviews || []).slice().reverse().map((h) => `<div><b style="font-weight:500">${esc(outcomeWord[h.outcome] || h.outcome)}</b> · ${esc(h.reviewer)} <span class="muted">· ${esc(stamp(h.at))}</span>${h.note ? `<p class="muted">${esc(h.note)}</p>` : ''}</div>`).join('') || '<div class="muted">No one has acted on this invoice yet. The automatic decision was recorded when it arrived.</div>'}</div>
           <div class="row mt"><a class="btn btn-sm" href="/api/runs/${esc(r.run_id)}/audit.json" download>Download audit record</a>${/REJECTED/.test(r.resolution || r.status) && !NON_INVOICE(r) ? '<button class="btn btn-sm" data-email>Write to supplier</button>' : ''}</div>`,
       };

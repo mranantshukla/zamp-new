@@ -39,8 +39,10 @@ app.config.update(MAX_CONTENT_LENGTH=8 * 1024 * 1024,
                   SESSION_COOKIE_SECURE=bool(os.getenv("RENDER")))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("asa")
-if os.getenv("RENDER") and (not os.getenv("DEMO_USERNAME") or not os.getenv("DEMO_PASSWORD") or not os.getenv("APP_SECRET")):
-    raise RuntimeError("APP_SECRET, DEMO_USERNAME and DEMO_PASSWORD are required in deployment")
+if os.getenv("RENDER"):
+    missing = [key for key in ("APP_SECRET", "DEMO_USERNAME", "DEMO_PASSWORD") if not os.getenv(key)]
+    if missing:
+        raise RuntimeError("Missing required deployment variables: " + ", ".join(missing))
 if os.getenv("RENDER"):
     # Render terminates TLS at one proxy hop; trust exactly that hop so login
     # throttling keys on the client address rather than the proxy's.

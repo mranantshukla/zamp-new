@@ -427,3 +427,26 @@ def test_ocr_and_ai_start_in_parallel_and_ai_can_win(monkeypatch):
     monkeypatch.setattr(web, "read_document_with_ai", ai_read)
     text, method, pages, cached, vision = web.read_parallel(b"image", ".jpg")
     assert method == "ai_vision" and vision["status"] == "COMPLETED"
+
+
+def test_isolated_ocr_releases_process_and_caches_result(client, monkeypatch):
+    import subprocess
+    monkeypatch.setenv("OCR_ISOLATED", "true")
+    calls = []
+    def child(args, **kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps([invoice_text(), "ocr", 1]).encode(), stderr=b"")
+    monkeypatch.setattr(subprocess, "run", child)
+    first = web.read_document_cached(b"unique-image-process-test", ".jpg")
+    second = web.read_document_cached(b"unique-image-process-test", ".jpg")
+    assert first[0] == invoice_text() and first[-1] is False and second[-1] is True
+    assert len(calls) == 1 and calls[0]["timeout"] == 25
+
+
+def test_isolated_ocr_timeout_is_reported(client, monkeypatch):
+    import subprocess
+    monkeypatch.setenv("OCR_ISOLATED", "true")
+    def timeout(*args, **kwargs): raise subprocess.TimeoutExpired("ocr", 25)
+    monkeypatch.setattr(subprocess, "run", timeout)
+    with pytest.raises(RuntimeError, match="deadline"):
+        web.read_document_cached(b"unique-timeout-test", ".jpg")

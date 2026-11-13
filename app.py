@@ -173,7 +173,21 @@ def read_document_cached(raw, suffix):
     cached = storage.cached_ocr(key)
     if cached is not None:
         return (*cached, True)
-    result = read_document(raw, suffix)
+    if os.getenv("RENDER") == "true" or os.getenv("OCR_ISOLATED") == "true":
+        # A timed-out Python thread cannot stop native ONNX work. A child process
+        # can be terminated and releases model/image memory between documents.
+        import subprocess
+        import sys
+        script = "import sys,json; from asa_invoice_processor import read_document; print(json.dumps(read_document(sys.stdin.buffer.read(),sys.argv[1])))"
+        try:
+            child = subprocess.run([sys.executable, "-c", script, suffix], input=raw,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT,
+                                   timeout=float(os.getenv("OCR_PROCESS_TIMEOUT", "25")), check=True)
+            result = tuple(json.loads(child.stdout.decode().strip().splitlines()[-1]))
+        except (subprocess.SubprocessError, ValueError, IndexError) as exc:
+            raise RuntimeError("Isolated OCR failed or exceeded its deadline") from exc
+    else:
+        result = read_document(raw, suffix)
     storage.save_ocr(key, result)
     return (*result, False)
 

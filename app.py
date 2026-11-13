@@ -8,6 +8,8 @@ import logging
 import os
 import threading
 import time
+import csv
+import io
 from datetime import timedelta
 from pathlib import Path
 
@@ -207,6 +209,25 @@ def create_upload():
     threading.Thread(target=process_run, args=(rid, raw, Path(name).suffix), daemon=True).start()
     return jsonify(run_id=rid), 202
 
+@app.post('/api/runs/bulk')
+def create_bulk_upload():
+    files = request.files.getlist('invoice_files')
+    if not files or len(files) > 25:
+        return jsonify(error='Select 1 to 25 documents'), 400
+    prepared = []
+    for file in files:
+        raw = file.read(8*1024*1024 + 1)
+        if len(raw) > 8*1024*1024: return jsonify(error=f'{file.filename}: exceeds 8 MB'), 413
+        try: name, mime = validate_file(file.filename, raw)
+        except ValueError as exc: return jsonify(error=f'{file.filename}: {exc}'), 400
+        prepared.append((name, mime, raw))
+    created = []
+    for name, mime, raw in prepared:
+        rid = storage.create_run(name, 'upload', raw, mime)
+        created.append({'run_id': rid, 'source': name})
+        threading.Thread(target=process_run, args=(rid, raw, Path(name).suffix), daemon=True).start()
+    return jsonify(runs=created), 202
+
 @app.post("/api/samples/<int:index>")
 def create_sample(index):
     rows = dataset_rows()
@@ -224,11 +245,21 @@ def runs_api():
     rows = storage.list_runs()
     decision = request.args.get("decision", "").upper()
     vendor = request.args.get("vendor", "").casefold()
+    query = request.args.get('q', '').strip().casefold()[:120]
     date = request.args.get("date", "")
     rows = [r for r in rows if (not decision or r["status"] == decision) and
             (not vendor or vendor in str(r.get("vendor") or "").casefold()) and
+            (not query or any(query in str(r.get(k) or '').casefold() for k in ('source','vendor','invoice_number','po_number','gstin','status','run_id'))) and
             (not date or r["time"].startswith(date))]
     return jsonify(rows)
+
+@app.get('/api/runs/export.csv')
+def export_runs():
+    fields = ['time','run_id','source','document_type','vendor','gstin','invoice_number','po_number','total','status','method','reasons']
+    output = io.StringIO(); writer = csv.DictWriter(output, fieldnames=fields); writer.writeheader()
+    for row in storage.list_runs(limit=10000):
+        writer.writerow({key: '; '.join(row.get(key) or []) if key == 'reasons' else row.get(key) for key in fields})
+    return Response(output.getvalue(), mimetype='text/csv', headers={'Content-Disposition':'attachment; filename="asa_invoice_records.csv"'})
 
 @app.post("/api/history/clear")
 def clear_history():

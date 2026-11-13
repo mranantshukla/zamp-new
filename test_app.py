@@ -77,6 +77,26 @@ def test_clean_pdf_duplicate_and_persistence(client):
     storage.engine.dispose()
     assert client.get("/api/runs/" + first["run_id"]).json["status"] == "APPROVED"
 
+def test_bulk_upload_search_and_csv_export(client):
+    with client.session_transaction() as sess: csrf = sess['csrf']
+    response = client.post('/api/runs/bulk', data={'invoice_files': [
+        (io.BytesIO(pdf(invoice_text(number='BATCH-1'))), 'batch-one.pdf'),
+        (io.BytesIO(pdf(invoice_text(number='BATCH-2', total='200.00', subtotal='20.00'))), 'batch-two.pdf')]},
+        headers={'X-CSRF-Token': csrf})
+    assert response.status_code == 202
+    assert len(response.json['runs']) == 2
+    for entry in response.json['runs']:
+        for _ in range(100):
+            run = client.get('/api/runs/' + entry['run_id']).json
+            if run['status'] != 'RUNNING': break
+            time.sleep(.05)
+        assert run['status'] != 'RUNNING'
+    found = client.get('/api/runs?q=BATCH-1').json
+    assert len(found) == 1 and found[0]['invoice_number'] == 'BATCH-1'
+    exported = client.get('/api/runs/export.csv')
+    assert exported.status_code == 200
+    assert b'BATCH-1' in exported.data and b'BATCH-2' in exported.data
+
 
 def test_ocr_cache_persists_but_decisions_are_recomputed(client, monkeypatch):
     calls = []

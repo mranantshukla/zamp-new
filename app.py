@@ -51,6 +51,7 @@ if os.getenv("RENDER"):
 storage.initialize()
 storage.recover_interrupted()
 RESET_DEMO_HISTORY = storage.reset_demo_history_once("2026-11-13-20-invoice-video") if os.getenv("RENDER") else False
+RESUME_DEMO_SEED = os.getenv("RENDER") and storage.demo_reset_applied("2026-11-13-20-invoice-video")
 
 # OCR inference is already serialized by a process-wide lock, so extra threads
 # only add memory pressure. A bounded pool queues batch uploads instead of
@@ -82,6 +83,11 @@ AI_RUNTIME_CONFIG = {
     "model": os.getenv("AI_REVIEW_MODEL", "gemini-3.1-flash-lite").strip(),
     "api_key": os.getenv("AI_REVIEW_API_KEY") or os.getenv("GEMINI_API_KEY", ""),
 }
+AI_RUNTIME_STATUS = {"last_error": None, "retry_after": 0.0}
+try:
+    DATASET_OCR_CACHE = json.loads((ROOT / "dataset_ocr_cache.json").read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    DATASET_OCR_CACHE = {}
 
 STAGE_NAMES = ["Document received", "PDF text / OCR", "OCR reader", "AI image reader", "Document classification", "Field extraction",
                "AI OCR reconciliation", "Extraction validation", "Vendor verification", "PO matching", "Financial validation",
@@ -174,6 +180,11 @@ def read_document_cached(raw, suffix):
     cached = storage.cached_ocr(key)
     if cached is not None:
         return (*cached, True)
+    prepared = DATASET_OCR_CACHE.get(key)
+    if prepared and prepared.get("text"):
+        result = (prepared["text"], prepared["method"], prepared["pages"])
+        storage.save_ocr(key, result)
+        return (*result, True)
     if os.getenv("RENDER") == "true" or os.getenv("OCR_ISOLATED") == "true":
         # A timed-out Python thread cannot stop native ONNX work. A child process
         # can be terminated and releases model/image memory between documents.
@@ -200,8 +211,8 @@ def read_parallel(raw, suffix, rid=None, use_ocr=False):
     """Race independent readers for scans; a usable text PDF avoids model cost."""
     def report(name, status, detail):
         if rid: stage(rid, name, status, detail)
-    def local_only(reason):
-        report("AI image reader", "SKIPPED", reason)
+    def local_only(reason, report_ai=True):
+        if report_ai: report("AI image reader", "SKIPPED", reason)
         report("OCR reader", "RUNNING", "Reading document locally")
         try:
             result = read_document_cached(raw, suffix)
@@ -219,12 +230,19 @@ def read_parallel(raw, suffix, rid=None, use_ocr=False):
         if len(text_layer.strip()) >= 80:
             return local_only("Readable PDF text; image AI not needed")
     if not use_ocr:
+        if time.monotonic() < AI_RUNTIME_STATUS["retry_after"]:
+            return local_only("AI retry cooldown; using local OCR fallback")
         report("OCR reader", "SKIPPED", "Optional OCR is off")
         report("AI image reader", "RUNNING", "Reading document with AI")
         result = read_document_with_ai(raw, suffix, dict(AI_RUNTIME_CONFIG))
         if result.get("status") != "COMPLETED":
-            report("AI image reader", "FAILED", "AI could not read document; retry or enable OCR")
-            raise RuntimeError("AI reader unavailable; retry or enable optional OCR")
+            AI_RUNTIME_STATUS["last_error"] = str(result.get("error") or result.get("status"))[:180]
+            AI_RUNTIME_STATUS["retry_after"] = time.monotonic() + 60
+            log.warning("AI image reader unavailable: %s", AI_RUNTIME_STATUS["last_error"])
+            report("AI image reader", "BLOCKED", "AI unavailable; using local OCR fallback")
+            return local_only("AI unavailable; local OCR fallback", report_ai=False)
+        AI_RUNTIME_STATUS["last_error"] = None
+        AI_RUNTIME_STATUS["retry_after"] = 0.0
         report("AI image reader", "COMPLETED", "AI document read completed")
         return result["text"], "ai_vision", result["pages"], False, result
     selected = set()
@@ -519,7 +537,7 @@ def ai_config_get():
     """Expose non-secret AI configuration state for the settings panel."""
     return jsonify(endpoint=AI_RUNTIME_CONFIG["endpoint"], model=AI_RUNTIME_CONFIG["model"],
                    api_key_configured=bool(AI_RUNTIME_CONFIG["api_key"]),
-                   configured=all(AI_RUNTIME_CONFIG.values()))
+                   configured=all(AI_RUNTIME_CONFIG.values()), last_error=AI_RUNTIME_STATUS["last_error"])
 
 @app.post("/api/ai/config")
 def ai_config_set():
@@ -994,16 +1012,19 @@ def seed_demo_invoices():
     for index in range(22):
         if index in (6, 11):  # delivery challan and purchase order
             continue
+        source = f"Indian GST invoice {index+1:02d}"
+        if not storage.prepare_demo_seed_source(source):
+            continue
         raw, error = dataset_image_bytes(index, rows[index]["row"])
         if not raw:
             log.error("Demo seed image %02d unavailable: %s", index + 1, error)
             continue
         label = json.loads(rows[index]["row"]["ground_truth"]).get("gt_parse", {}).get("header", {})
-        rid = storage.create_run(f"Indian GST invoice {index+1:02d}", "dataset_evaluation", raw, "image/jpeg")
+        rid = storage.create_run(source, "dataset_evaluation", raw, "image/jpeg")
         executor.submit(process_run, rid, raw, ".jpg", "dataset_evaluation", label, use_ocr=False)
     log.info("Queued the 20 invoice-candidate dataset images")
 
-if RESET_DEMO_HISTORY and os.getenv("RENDER"):
+if RESUME_DEMO_SEED:
     threading.Thread(target=seed_demo_invoices, name="seed-demo-invoices", daemon=True).start()
 
 if __name__ == "__main__":

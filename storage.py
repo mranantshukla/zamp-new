@@ -149,6 +149,20 @@ def reset_demo_history_once(key):
         conn.execute(insert(demo_resets).values(key=key, at=now()))
         return True
 
+def demo_reset_applied(key):
+    with engine.connect() as conn:
+        return conn.execute(select(demo_resets.c.key).where(demo_resets.c.key == key)).first() is not None
+
+def prepare_demo_seed_source(source):
+    """Return true if a source needs seeding; hide interrupted failed attempts."""
+    with engine.begin() as conn:
+        rows = conn.execute(select(runs.c.id, runs.c.status).where(
+            runs.c.source == source, runs.c.event_type == "dataset_evaluation", runs.c.archived == 0)).all()
+        failed = [rid for rid, status in rows if status == "FAILED"]
+        if failed:
+            conn.execute(update(runs).where(runs.c.id.in_(failed)).values(archived=1))
+        return not any(status != "FAILED" for _, status in rows)
+
 def recover_interrupted():
     """Close runs left active by a terminated single-worker process."""
     with engine.begin() as conn:

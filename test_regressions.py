@@ -480,3 +480,13 @@ def test_reference_inferred_po_requires_clear_structured_match(tmp_path):
     result = processor.decide({**inv, "po_number": "PO-1"}, po, history, pos=pos)
     assert result.status == "PENDING_REVIEW"
     assert any(c["check"] == "goods_received" and not c["passed"] for c in result.checks)
+
+
+def test_tax_inclusive_bill_does_not_add_tax_twice(tmp_path):
+    po, history = fixture(tmp_path)
+    inv=invoice(); inv["tax"]=180; inv["details"]={"tax_inclusive":True}
+    result=processor.decide(inv,po,history,method="ai_vision")
+    assert result.status == "APPROVED"
+    assert next(c for c in result.checks if c["check"]=="invoice_math")["passed"]
+    inv["total"] = 950
+    assert processor.decide(inv,po,history,method="ai_vision").status == "PENDING_REVIEW"

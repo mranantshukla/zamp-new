@@ -31,6 +31,7 @@ def apply_bill_policy(inv, checks, history, po, master=()):
             total, sub = inv.get("total"), inv.get("subtotal")
             if total is not None and sub is not None:
                 expected = sub - abs(inv.get("discount") or 0) + (inv.get("tax") or 0) + (details.get("shipping_amount") or 0) + (details.get("rounded_off") or 0)
+                if details.get("tax_inclusive"): expected -= (inv.get("tax") or 0)
                 if abs(total - expected) <= max(.05, small_difference(expected)):
                     c.update(passed=True, outcome="VERIFIED_PASS", detail=f"Totals differ by {abs(total-expected):.2f}, within reference rounding tolerance")
                 else: c.update(outcome="UNCERTAIN", category="review")

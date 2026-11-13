@@ -482,3 +482,31 @@ def test_retry_cannot_unblock_supplier(client):
     with client.session_transaction() as sess: csrf = sess["csrf"]
     response = client.post(f"/api/runs/{row['run_id']}/retry", json={"reviewer":"Anant", "verify_vendor":True}, headers={"X-CSRF-Token":csrf})
     assert response.status_code == 409
+
+
+def test_structured_vision_clears_heuristic_amounts_and_derives_lines(monkeypatch):
+    payload = {"text":"Seller: Acme Supplies\nPart A 500.00\nPart B 320.00\nCGST 90.00 SGST 90.00\nGrand Total 1000.00", "fields":{"vendor":{"value":"Acme Supplies","evidence":"Seller: Acme Supplies"}, "tax":{"value":180,"evidence":"CGST 90.00 SGST 90.00"},"total":{"value":1000,"evidence":"Grand Total 1000.00"}}, "line_items":[{"description":"A","amount":500},{"description":"B","amount":320}], "document_type":"TAX_INVOICE"}
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def read(self,*args): return json.dumps({"choices":[{"message":{"content":json.dumps(payload)}}]}).encode()
+    def provider(req, timeout):
+        body = json.loads(req.data)
+        assert body["response_format"]["type"] == "json_schema"
+        assert "line_items" in body["response_format"]["json_schema"]["schema"]["required"]
+        return Response()
+    monkeypatch.setattr(ai_extraction.request,"urlopen",provider)
+    result = ai_extraction.read_document_with_ai(pdf(invoice_text()),".pdf",{"endpoint":"https://example.com","model":"test","api_key":"test"})
+    assert result["status"] == "COMPLETED"
+    assert result["fields"]["subtotal"] == 820
+    assert result["fields"]["tax"] == 180
+    assert result["fields"]["invoice_number"] is None  # no heuristic substitution
+    assert result["details"]["tax_breakdown"] == {}
+
+
+def test_structured_vision_never_keeps_parser_guesses(client, monkeypatch):
+    monkeypatch.setattr(web,"read_document_with_ai",lambda *a:{"status":"COMPLETED","structured":True,"text":invoice_text(),"pages":1,"model":"test","fields":{k:None for k in ai_extraction.VISION_FIELDS},"details":{"identity_ambiguous":False,"tax_breakdown":{}},"line_items":[]})
+    monkeypatch.setattr(web,"read_document_cached",lambda *a: (_ for _ in ()).throw(RuntimeError()))
+    row=submit(client,pdf(invoice_text()))
+    assert row["status"] == "PENDING_REVIEW"
+    assert row["invoice"]["total"] is None

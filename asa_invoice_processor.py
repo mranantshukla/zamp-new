@@ -644,6 +644,7 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
         if not within: po_status = "BLOCKED"
     if inv.get("subtotal") is not None and inv.get("total") is not None and inv.get("tax") is not None:
         expected = inv["subtotal"] - (inv.get("discount") or 0) + inv["tax"] + (inv.get("details", {}).get("shipping_amount") or 0) + (inv.get("details", {}).get("rounded_off") or 0)
+        if inv.get("details", {}).get("tax_inclusive"): expected -= inv["tax"]
         math_ok = abs(expected - inv["total"]) <= 0.01
         check("invoice_math", math_ok, f"Computed={expected:.2f}; stated={inv['total']:.2f}", "review" if ("ocr" in method or method == "ai_vision") else "confirmed")
     components = inv.get("details", {}).get("tax_breakdown") or {}

@@ -309,6 +309,13 @@ def process_run(rid, raw, suffix, event_type="upload", label=None, use_ocr=False
         if vision and vision["status"] == "COMPLETED":
             structured = vision.get("fields") or {}
             invoice.update(structured)
+            if vision.get("structured"):
+                invoice["field_metadata"] = {}
+                invoice["line_items"] = vision.get("line_items") or []
+                invoice["details"].update(vision.get("details") or {})
+                if vision.get("document_type"):
+                    kind = invoice["document_type"] = vision["document_type"]
+                    routing = document_routing(kind)
             invoice["field_metadata"].update(vision.get("field_metadata") or {})
             invoice["details"]["seller"] = invoice.get("vendor")
             invoice["details"]["invoice_date"] = invoice.get("date")

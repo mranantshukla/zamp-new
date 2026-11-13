@@ -460,3 +460,25 @@ def test_ai_default_does_not_start_ocr(monkeypatch):
     monkeypatch.setattr(web, "read_document_cached", no_ocr)
     monkeypatch.setattr(web, "read_document_with_ai", lambda *a: {"status": "COMPLETED", "text": invoice_text(), "pages": 1})
     assert web.read_parallel(b"image", ".jpg")[1] == "ai_vision"
+
+
+def test_verify_vendor_and_retry_audits_and_preserves_dataset_isolation(client, monkeypatch):
+    row = submit(client, pdf(invoice_text(number="VERIFY-1", vendor="New Supplier", po="", subtotal="800")))
+    queued = []
+    monkeypatch.setattr(web, "submit_run", lambda *args: queued.append(args))
+    with client.session_transaction() as sess: csrf = sess["csrf"]
+    response = client.post(f"/api/runs/{row['run_id']}/retry", json={"reviewer":"Anant", "verify_vendor":True}, headers={"X-CSRF-Token":csrf})
+    assert response.status_code == 202
+    rows, _ = web.master_data.load("vendor_master", web.ROOT / "samples")
+    assert next(v for v in rows if v["vendor"] == "New Supplier")["status"] == "APPROVED"
+    assert queued[0][3] == "upload"
+    assert client.get(f"/api/runs/{row['run_id']}").json["status"] == row["status"]
+    assert {r["outcome"] for r in client.get(f"/api/runs/{row['run_id']}").json["reviews"]} >= {"VENDOR_VERIFIED", "RETRIED"}
+
+
+def test_retry_cannot_unblock_supplier(client):
+    (web.ROOT / "samples" / "vendor_master.csv").write_text("vendor,status\nAcme Supplies,BLOCKED\n")
+    row = submit(client, pdf(invoice_text(number="VERIFY-BLOCK")))
+    with client.session_transaction() as sess: csrf = sess["csrf"]
+    response = client.post(f"/api/runs/{row['run_id']}/retry", json={"reviewer":"Anant", "verify_vendor":True}, headers={"X-CSRF-Token":csrf})
+    assert response.status_code == 409

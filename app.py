@@ -575,6 +575,37 @@ def document_api(rid):
                     headers={"Content-Disposition":"inline; filename=\"" + secure_filename(doc.filename) + "\"",
                              "Cache-Control":"private, no-store", "X-Content-Type-Options":"nosniff"})
 
+@app.post("/api/runs/<rid>/retry")
+def retry_run_api(rid):
+    row = storage.get_run(rid)
+    if not row: abort(404)
+    if row["status"] == "RUNNING": return jsonify(error="This document is still processing"), 409
+    doc = storage.document_for_run(rid)
+    if not doc: return jsonify(error="No source document retained"), 409
+    data = request.get_json(silent=True) or {}
+    reviewer = str(data.get("reviewer") or "").strip()[:80]
+    if not reviewer: return jsonify(error="Reviewer is required"), 400
+    if data.get("verify_vendor") is True:
+        vendor = (row.get("invoice") or {}).get("vendor")
+        if not vendor: return jsonify(error="Correct the missing seller name before verifying the vendor"), 400
+        rows, _ = master_data.load("vendor_master", ROOT / "samples")
+        rows = rows or []
+        from asa_invoice_processor import normalize_identity
+        matches = [v for v in rows if normalize_identity(v.get("vendor")) == normalize_identity(vendor)]
+        if any(v.get("status", "").upper() in {"BLOCKED", "PROHIBITED", "UNAUTHORISED"} for v in matches):
+            return jsonify(error="Blocked suppliers cannot be verified here"), 409
+        if matches:
+            for v in matches: v["status"] = "APPROVED"
+        else: rows.append({"vendor": vendor, "status": "APPROVED"})
+        master_data.save("vendor_master", master_data.to_csv("vendor_master", rows), reviewer)
+        storage.record_review(rid, reviewer, "VENDOR_VERIFIED", vendor, {})
+    event_type = row.get("event_type", "upload")
+    new_id = storage.create_run(row["source"], event_type, doc.content, doc.mime)
+    storage.record_review(rid, reviewer, "RETRIED", "New run: " + new_id, {})
+    suffix = ".pdf" if doc.mime == "application/pdf" else ".png" if doc.mime == "image/png" else ".jpg"
+    submit_run(new_id, doc.content, suffix, event_type)
+    return jsonify(run_id=new_id), 202
+
 CORRECTABLE_FIELDS = {"invoice_number", "po_number", "vendor", "gstin", "date", "total", "subtotal", "discount", "tax"}
 
 @app.post("/api/runs/<rid>/issues/<issue>")

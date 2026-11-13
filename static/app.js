@@ -563,13 +563,13 @@
       for (const review of r.reviews || []) {
         if (['ISSUE_ACKNOWLEDGED', 'ISSUE_REOPENED'].includes(review.outcome)) acknowledgements[review.note] = review.outcome === 'ISSUE_ACKNOWLEDGED';
       }
-      const issueTick = (c) => `<label class="small"><input type="checkbox" data-issue="${esc(c.check)}" ${acknowledgements[c.check] ? 'checked' : ''}> Acknowledged</label>`;
+      const issueTick = (c) => `<label class="small"><input type="checkbox" data-issue="${esc(c.check)}" ${acknowledgements[c.check] ? 'checked' : ''}> Acknowledged</label> <button class="btn btn-sm" data-retry>Rerun</button>${['vendor_master','vendor_identity','payee_identified'].includes(c.check) && inv.vendor ? ' <button class="btn btn-sm" data-verify-vendor>Verify vendor &amp; rerun</button>' : ''}`;
       let verdict;
       if (r.status === 'RUNNING') {
         const current = m.stages.find((n) => latest[n]?.status === 'RUNNING') || 'Starting';
         verdict = `<div class="verdict info"><h3>Reading now — ${esc(current.toLowerCase())}</h3><p>Step ${Math.min(done + 1, totalSteps)} of ${totalSteps}. This page fills in as each check finishes.</p><div class="progress" style="margin-top:6px"><i style="width:${(done / totalSteps) * 100}%"></i></div></div>`;
       } else if (r.status === 'FAILED') {
-        verdict = `<div class="verdict bad"><h3>This document could not be processed</h3><p>${esc(r.error || '')}</p><div class="row" style="margin-top:6px"><a class="btn btn-sm" href="#/upload">Try another file</a></div></div>`;
+        verdict = `<div class="verdict bad"><h3>This document could not be processed</h3><p>${esc(r.error || '')}</p><div class="row" style="margin-top:6px"><button class="btn btn-sm" data-retry>Retry now</button><a class="btn btn-sm" href="#/upload">Try another file</a></div></div>`;
       } else if (NON_INVOICE(r)) {
         verdict = `<div class="verdict"><h3>Kept for reference, not for payment</h3><p>${esc(r.document_routing?.reason || '')}. It stays out of approval figures.</p></div>`;
       } else if (r.resolution) {
@@ -578,7 +578,7 @@
           ${okd ? '' : '<div class="row" style="margin-top:6px"><button class="btn btn-sm" data-email>Write to supplier</button></div>'}</div>`;
       } else if (r.status === 'APPROVED') {
         const advisory = checks.filter((c) => c.outcome === 'ADVISORY');
-        verdict = `<div class="verdict ok"><h3>Cleared automatically</h3><p>Supplier, purchase order, arithmetic and duplicate checks all passed.</p>${advisory.length ? `<p>Reported for your records; no action required:</p><ul>${advisory.map((c) => `<li>${esc(c.detail)} ${issueTick(c)}</li>`).join('')}</ul>` : ''}</div>`;
+        verdict = `<div class="verdict ok"><h3>Cleared automatically</h3><p>No blocking payment risks found. Advisory issues are listed below.</p>${advisory.length ? `<p>Reported for your records; no action required:</p><ul>${advisory.map((c) => `<li>${esc(c.detail)} ${issueTick(c)}</li>`).join('')}</ul>` : ''}</div>`;
       } else if (r.status === 'REJECTED') {
         verdict = `<div class="verdict bad"><h3>Held back — not payable as sent</h3><ul class="reasons" style="margin-top:4px">${reasons.map((x) => `<li>${esc(human(x))}${checks.find((c) => c.detail === x) ? issueTick(checks.find((c) => c.detail === x)) : ''}</li>`).join('')}</ul><div class="row" style="margin-top:8px"><button class="btn btn-sm" data-email>Write to supplier</button></div></div>`;
       } else {
@@ -623,6 +623,14 @@
       restore();
       $$('[data-tab]').forEach((b) => b.addEventListener('click', () => { if (editing) pending = { ...pending, ...corrections() }; tab = b.dataset.tab; draw(run); }));
       $$('[data-email]').forEach((b) => b.addEventListener('click', () => { $('#emailbody').value = supplierNote(run); $('#emaildialog').showModal(); }));
+      $$('[data-retry], [data-verify-vendor]').forEach((button) => button.addEventListener('click', async () => {
+        const reviewer = await ensureName(); if (!reviewer) return;
+        button.disabled = true;
+        try {
+          const result = await api(`/api/runs/${rid}/retry`, {method:'POST', json:{reviewer, verify_vendor:button.hasAttribute('data-verify-vendor')}});
+          go(`#/invoice/${result.run_id}?from=upload`);
+        } catch (error) { toast(error.message, {tone:'bad'}); button.disabled = false; }
+      }));
       $$('[data-issue]').forEach((box) => box.addEventListener('change', async () => {
         const acknowledged = box.checked;
         box.disabled = true;

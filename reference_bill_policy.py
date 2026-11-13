@@ -62,6 +62,10 @@ def apply_bill_policy(inv, checks, history, po, master=()):
                 if c["check"] == "invoice_arithmetic_available": c.update(passed=True, outcome="VERIFIED_PASS", detail="No GST charged; subtotal and total reconcile")
     from difflib import SequenceMatcher
     record = next((m for m in master if normalize_identity(m.get("vendor")) == normalize_identity(inv.get("vendor"))), {})
+    if record.get("status", "").upper() in {"APPROVED", "ACTIVE"} and inv.get("vendor"):
+        for c in checks:
+            if c["check"] == "vendor_identity" and not c["passed"]:
+                c.update(outcome="ADVISORY", category="advisory", detail="Seller verified in supplier master; printed GST identity remains ambiguous")
     account, expected_account = details.get("account_number"), record.get("bank_account")
     if expected_account and account and str(account).replace(" ", "") != str(expected_account).replace(" ", ""):
         add("bank_account_match", False, "Printed bank account differs from the supplier account on file; verify through an established contact")

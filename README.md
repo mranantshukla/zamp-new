@@ -46,7 +46,7 @@ The old text sample lacks subtotal and routes to review under the current policy
 
 Confirmed violations outrank uncertainty. Missing data is blocked or uncertain, never a pass. An approved or paid invoice with the same normalized vendor and invoice number is a business duplicate and is rejected. Repeated pending submissions remain pending with a separate warning. Partial invoices consume PO balance cumulatively. OCR does not automatically force review: critical OCR fields need direct source-label evidence and checks must pass. This structural evidence check is not a calibrated probability or proof of extraction correctness.
 
-Non-tax-invoice document types route to review. The run monitor streams database-backed events. Manual corrections are separate from original automated decisions. “Clear history” archives the visible list while retaining duplicate and PO audit records.
+Non-tax-invoice documents receive a separate routing status (`NON_INVOICE`) and bypass AI invoice reconciliation. They remain visible in history but are excluded from invoice approval and exception-rate metrics. The run monitor streams database-backed events. Manual corrections are separate from original automated decisions. “Clear history” archives the visible list while retaining duplicate and PO audit records.
 
 Completed runs, stage history, reviews and OCR cache survive server restarts through the database. Login sessions use signed cookies valid for seven days when `APP_SECRET` is stable. A server restart loses AI settings entered only in the dashboard; set the environment variables above for persistent settings. The run trace shows provider HTTP errors without exposing the configured API key.
 

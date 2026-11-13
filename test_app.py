@@ -131,6 +131,17 @@ def test_decisions(client, change, expected):
     if change.get("heading") == "DELIVERY CHALLAN": assert row["document_type"] == "DELIVERY_CHALLAN"
 
 
+def test_non_invoice_has_separate_routing_status(client):
+    row = submit(client, pdf(invoice_text(heading="DELIVERY CHALLAN", number="CH-1")))
+    assert row["status"] == "PENDING_REVIEW"
+    assert row["document_routing"] == {
+        "status": "NON_INVOICE",
+        "reason": "Delivery Challan routed outside invoice approval",
+    }
+    stages = [stage for stage in row["stages"] if stage["stage"] == "AI OCR reconciliation"]
+    assert stages[-1]["status"] == "SKIPPED"
+
+
 def test_scanned_pdf_image_and_ocr_failure(client, monkeypatch):
     image = Image.new("RGB", (600,400), "white"); out=io.BytesIO(); image.save(out, format="PNG")
     scan = fitz.open(); p=scan.new_page(); p.insert_image(p.rect, stream=out.getvalue())

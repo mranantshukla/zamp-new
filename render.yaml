@@ -25,6 +25,16 @@ services:
         sync: false
       - key: DEMO_PASSWORD
         sync: false
+      # Optional Gemini/OpenAI-compatible extraction configuration. Supply
+      # these in Render; the API key never reaches the browser or repository.
+      - key: AI_REVIEW_API_URL
+        sync: false
+      - key: AI_REVIEW_MODEL
+        sync: false
+      - key: AI_REVIEW_API_KEY
+        sync: false
+      - key: AI_REQUEST_TIMEOUT
+        value: "12"
 databases:
   - name: zampai-postgres
     plan: free

@@ -1,4 +1,6 @@
-# AjitRawat/invoice extraction benchmark
+# Earlier AjitRawat/invoice extraction benchmark
+
+This is a historical run. See `DATASET_BENCHMARK.md` for the latest 22-image result.
 
 Run on the 22 cached original images with RapidOCR and the current `extract_invoice` parser on 13 November 2026. Dataset labels were used only in `evaluate_dataset`, after extraction. The current OCR path first reads the original image; only low-contrast images receive a second, deskewed/denoised contrast candidate, and the higher-scoring OCR text is retained.
 

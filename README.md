@@ -13,7 +13,7 @@ An accounts payable case study that reads PDF or image bills, extracts invoice f
 - `app.py`: Flask JSON API, live stage stream, document preview, review workflow and sample evaluation.
 - `templates/index.html`, `static/app.js`, `static/app.css`: the workspace UI, a dependency-free single-page app (light theme by default, dark on toggle).
 - `workflow.py`: plain-language check names and exception routing: which team reviews an invoice, and its deadline.
-- `storage.py`: SQLAlchemy persistence for document bytes, runs, stages and reviews. PostgreSQL on Render; SQLite locally. Schema v2 adds indexed summary columns (vendor/invoice/PO keys, total, dates, routing, archived) so duplicate and PO-balance lookups touch only related rows; existing v1 databases are migrated additively on start-up.
+- `storage.py`: SQLAlchemy persistence for document bytes, runs, stages and reviews. SQLite is the default; set `DATABASE_URL` for PostgreSQL. Schema v2 adds indexed summary columns (vendor/invoice/PO keys, total, dates, routing, archived) so duplicate and PO-balance lookups touch only related rows; existing v1 databases are migrated additively on start-up.
 - `master_data.py`: validated PO and vendor master lists stored in the database (falling back to `samples/pos.csv` and `samples/vendor_master.csv`).
 - Successful OCR text is cached in the same database by document hash and OCR settings. Repeated uploads reuse OCR but always rerun vendor, PO, duplicate and financial decisions. Failed OCR is never cached.
 - `asa_dashboard.py`: preserved legacy `Handler` for compatibility tests. Running the file starts the new Flask dashboard. `backend/` is an unused older prototype.
@@ -58,7 +58,7 @@ Confirmed violations outrank uncertainty. Missing data is blocked or uncertain, 
 
 Non-tax-invoice documents receive a separate routing status (`NON_INVOICE`) and bypass AI invoice reconciliation. They remain visible in history but are excluded from invoice approval and exception-rate metrics. The run monitor streams database-backed events. Manual corrections are separate from original automated decisions. “Clear history” archives the visible list while retaining duplicate and PO audit records.
 
-Completed runs, stage history, reviews and OCR cache survive server restarts through the database. Login sessions use signed cookies valid for seven days when `APP_SECRET` is stable. A server restart loses AI settings entered only in the dashboard; set the environment variables above for persistent settings. The run trace shows provider HTTP errors without exposing the configured API key.
+Completed runs, stage history, reviews and OCR cache survive server restarts when the database is persistent. The free Render Blueprint uses ephemeral SQLite, so that guarantee does not apply there. Login sessions use signed cookies valid for seven days when `APP_SECRET` is stable. A server restart loses AI settings entered only in the dashboard; set the environment variables above for persistent settings. The run trace shows provider HTTP errors without exposing the configured API key.
 
 ## Demo and tests
 

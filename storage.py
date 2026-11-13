@@ -1,4 +1,4 @@
-"""Transactional run/document storage. PostgreSQL in deployment, SQLite for local tests."""
+"""Transactional run/document storage. SQLite by default; PostgreSQL via DATABASE_URL."""
 from __future__ import annotations
 
 import json

@@ -52,6 +52,11 @@ def test_gstin_checksum_and_vendor_master(tmp_path):
     assert processor.decide(inv, po, history).status == "REJECTED"
 
 
+def test_document_title_precedes_cross_references():
+    assert processor.classify_document("TAX INVOICE\nPurchase Order: PO-1001") == "TAX_INVOICE"
+    assert processor.classify_document("PURCHASE ORDER\nPlease send a tax invoice after delivery") == "PURCHASE_ORDER"
+
+
 def test_missing_or_ambiguous_vendor_pending(tmp_path):
     po, history = fixture(tmp_path)
     inv = invoice(vendor="Unknown")

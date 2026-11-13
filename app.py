@@ -187,7 +187,8 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         current = "PDF text / OCR"; stage(rid, current, "RUNNING")
         ocr_started = time.monotonic()
         text, method, pages, cache_hit = read_document_cached(raw, suffix)
-        stage(rid, current, "COMPLETED", f"{method}; {pages} page(s); {time.monotonic()-ocr_started:.2f}s" + ("; cached" if cache_hit else ""))
+        ocr_seconds = time.monotonic() - ocr_started
+        stage(rid, current, "COMPLETED", f"{method}; {pages} page(s); {ocr_seconds:.2f}s" + ("; cached" if cache_hit else ""))
         current = "Document classification"; stage(rid, current, "RUNNING")
         kind = classify_document(text)
         routing = document_routing(kind)
@@ -203,9 +204,10 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
             ai_extraction = {"status": "SKIPPED", "accepted_fields": [], "reason": routing["reason"]}
         else:
             invoice, ai_extraction = reconcile_ocr(invoice, text, AI_RUNTIME_CONFIG)
+        ai_extraction_seconds = time.monotonic() - ai_started
         detected = sum(bool(invoice.get(k)) for k in ("invoice_number", "vendor", "po_number", "date", "total"))
         if ai_extraction["status"] == "COMPLETED":
-            stage(rid, current, "COMPLETED", f"{len(ai_extraction['accepted_fields'])} OCR-backed field(s) accepted; {detected}/5 key fields detected; {time.monotonic()-ai_started:.2f}s")
+            stage(rid, current, "COMPLETED", f"{len(ai_extraction['accepted_fields'])} OCR-backed field(s) accepted; {detected}/5 key fields detected; {ai_extraction_seconds:.2f}s")
         elif ai_extraction["status"] in ("NOT_CONFIGURED", "SKIPPED"):
             stage(rid, current, "SKIPPED", ai_extraction.get("reason", "No AI extraction model configured; deterministic OCR retained"))
         else:
@@ -231,8 +233,8 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
             review_route = workflow.route(decision.status, decision.checks) if routing["status"] != "NON_INVOICE" else None
             extra = {"ai_extraction": ai_extraction, "ai_review": ai_review, "review_route": review_route,
                      "document_routing": routing,
-                     "timings": {"ocr_seconds": round(time.monotonic()-ocr_started, 2),
-                                 "ai_extraction_seconds": round(time.monotonic()-ai_started, 2),
+                     "timings": {"ocr_seconds": round(ocr_seconds, 2),
+                                 "ai_extraction_seconds": round(ai_extraction_seconds, 2),
                                  "total_seconds": round(time.monotonic()-started, 2)},
                      "ocr_cache_hit": cache_hit}
             if event_type == "dataset_evaluation" and label is not None:

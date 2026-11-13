@@ -54,15 +54,20 @@ class Decision:
 
 def classify_document(text: str) -> str:
     head = " ".join(text[:2500].upper().split())
-    for pattern, kind in (
+    titles = (
         (r"\bPURCHASE\s*ORDER\b", "PURCHASE_ORDER"),
         (r"\bDELIVERY\s*CHALLAN\b", "DELIVERY_CHALLAN"),
         (r"\bCREDIT\s*NOTE\b", "CREDIT_NOTE"),
         (r"\bDEBIT\s*NOTE\b", "DEBIT_NOTE"),
         (r"\bPRO\s*FORMA\s*INVOICE\b", "PROFORMA_INVOICE"),
         (r"\b(?:TAX\s*INVOICE|TAXINVOICE|TAR\s*INVOICE)\b", "TAX_INVOICE"),
-    ):
-        if re.search(pattern, head): return kind
+    )
+    # An invoice can mention a purchase order or delivery challan. Treat the
+    # first document title as the heading instead of giving references priority.
+    matches = [(match.start(), kind) for pattern, kind in titles
+               if (match := re.search(pattern, head))]
+    if matches:
+        return min(matches)[1]
     if re.search(r"\bINVOICE\s*(?:NO\.?|NUMBER|#)\b", head): return "TAX_INVOICE"
     return "UNKNOWN"
 
@@ -489,7 +494,7 @@ def extract_invoice(text: str) -> dict:
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d-%b-%Y", "%d-%B-%Y")
 
 def parse_date(value) -> date_type | None:
-    """Parse the date formats accepted by extraction; None when unparseable."""
+    """Parse the date formats accepted by extraction; None when unparsable."""
     for fmt in DATE_FORMATS:
         try: return datetime.strptime(str(value or "").strip(), fmt).date()
         except ValueError: pass

@@ -293,3 +293,20 @@ def test_font_stylesheet_url_is_not_html_escaped(client):
     # An escaped URL becomes relative and re-requests the whole page as CSS.
     html = client.get("/").get_data(as_text=True)
     assert "&#39;https://fonts" not in html and 'href="https://fonts.googleapis.com/css2?family=Geist' in html
+
+
+def test_dashboard_scope_and_timings_exclude_archived_attempts(client):
+    from datetime import timedelta
+    old = storage.create_run("old", "upload")
+    current = storage.create_run("sample", "dataset_evaluation")
+    t = datetime(2026, 11, 13, tzinfo=timezone.utc)
+    with storage.engine.begin() as conn:
+        conn.execute(storage.runs.update().where(storage.runs.c.id == old).values(status="APPROVED", archived=1))
+        conn.execute(storage.runs.update().where(storage.runs.c.id == current).values(status="APPROVED", processing_seconds=5))
+        for rid, duration in ((old, 25), (current, 5)):
+            conn.execute(storage.stages.insert(), [dict(run_id=rid,stage="AI image reader",status="RUNNING",detail="",at=t),dict(run_id=rid,stage="AI image reader",status="COMPLETED",detail="",at=t+timedelta(seconds=duration))])
+    assert client.get("/api/analytics/summary").json["documents"] == 0
+    summary = client.get("/api/analytics/summary?scope=all").json
+    assert summary["documents"] == summary["dataset_documents"] == 1
+    assert summary["step_seconds"] == [{"stage":"AI image reader", "seconds":5.0}]
+    assert storage.approved_by_po() == {}

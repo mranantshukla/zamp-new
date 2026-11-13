@@ -209,12 +209,14 @@
     return `<svg viewBox="0 0 132 132" aria-hidden="true"><circle class="track-c" cx="66" cy="66" r="54"/>${parts.filter((p) => p.value).map((p) => {
       const len = (p.value / total) * C; const s = `<circle cx="66" cy="66" r="54" stroke="${p.color}" stroke-dasharray="${Math.max(len - 2, 0.5)} ${C}" stroke-dashoffset="${-offset}"/>`; offset += len; return s; }).join('')}</svg>`;
   }
+  let overviewTimer;
   async function overviewPage(_args, _params, alive) {
-    const [s, recent, queueRes] = await Promise.all([api('/api/analytics/summary'), api('/api/runs?limit=8'), api('/api/runs?open=1&limit=200')]);
+    const [s, recent, queueRes] = await Promise.all([api(`/api/analytics/summary?scope=${_params.get('scope') === 'business' ? 'business' : 'all'}`), api('/api/runs?limit=8'), api('/api/runs?open=1&limit=200')]);
     if (!alive()) return;
     setCrumb('<b>Today</b>');
     const im = s.invoice_metrics;
-    const queue = queueRes.slice().sort(byDue);
+    const scope = _params.get('scope') === 'business' ? 'business' : 'all';
+    const queue = queueRes.filter(r => scope === "all" || r.event_type !== "dataset_evaluation").sort(byDue);
     const hour = new Date().getHours();
     const hello = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
     const name = reviewerName().split(/\s+/)[0];
@@ -234,21 +236,23 @@
     const daily = new Map(s.daily.map((d) => [d.date, d]));
     const days = [...Array(14)].map((_, i) => { const d = new Date(); d.setUTCDate(d.getUTCDate() - (13 - i)); const key = d.toISOString().slice(0, 10); const v = daily.get(key) || { APPROVED: 0, PENDING_REVIEW: 0, REJECTED: 0 }; return { key, total: v.APPROVED + v.PENDING_REVIEW + v.REJECTED, auto: v.APPROVED }; });
     const stepTotal = s.step_seconds.reduce((n, x) => n + x.seconds, 0) || 1;
-    const palette = ['#0d0d0d', '#f98963', '#ac90e1', '#80b068', '#e9c46a', '#ff98d9', '#7d8ff0', '#c5bfb5'];
+    const palette = ['#6a9e8a', '#f98963', '#ac90e1', '#80b068', '#e9c46a', '#ff98d9', '#7d8ff0', '#c5bfb5'];
     const steps = s.step_seconds.slice().sort((a, b) => b.seconds - a.seconds);
     const big = steps.slice(0, 5); const rest = steps.slice(5).reduce((n, x) => n + x.seconds, 0);
     const segments = [...big.map((x, i) => ({ label: x.stage, seconds: x.seconds, color: palette[i] })), ...(rest ? [{ label: `${steps.length - 5} other steps`, seconds: rest, color: palette[7] }] : [])];
 
     view.innerHTML = `
+      <div class="overview-toolbar"><span class="kicker">Overview · visible records</span><label>Show <select id="overview-scope"><option value="all" ${scope === 'all' ? 'selected' : ''}>All documents, including dataset</option><option value="business" ${scope === 'business' ? 'selected' : ''}>Business invoices only</option></select></label><button class="btn btn-sm" id="refresh-overview">Refresh</button></div>
       <p class="motto"><svg viewBox="0 0 48 24" aria-hidden="true"><path d="M24 12C28 6 34 4.5 39 7.5C44 10.5 43.5 17.5 38 19.5C32.5 21.5 28 17 24 12C20 7 15.5 2.5 10 4.5C4.5 6.5 4 13.5 9 16.5C14 19.5 20 18 24 12Z" stroke="url(#infgrad)" stroke-width="3.6"/></svg><span>The potential is always infinite.</span></p>
       <section class="greeting"><div><span class="kicker">${esc(new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' }))}</span>
         <h1>${hello}${name ? `, ${esc(name)}` : ''}.</h1><p>${brief}</p></div>
         <div class="actions">${queue.length ? `<a class="btn btn-primary" href="#/review">Work the exceptions</a><a class="btn" href="#/upload">Bring in invoices</a>` : `<a class="btn btn-primary" href="#/upload">Bring in invoices</a>`}</div></section>
 
-      <section class="panel"><div class="panel-head"><div><h2>Pipeline</h2><p>Every document, from arrival to outcome</p></div><a class="btn btn-sm btn-ghost" href="#/invoices">All invoices</a></div>
+      <div class="overview-kpis"><a href="#/invoices"><small>Documents received</small><b>${s.documents}</b><small>${im.non_invoices} filed for reference</small></a><a href="#/invoices"><small>Approved</small><b class="ok">${im.approved}</b><small>${pct(s.touchless_rate)} handled automatically</small></a><a href="#/review"><small>Needs review</small><b class="warn">${im.pending}</b><small>Only blocking issues</small></a><a href="#/invoices"><small>Typical processing</small><b>${secs(s.processing_seconds.median)}</b><small>Current visible records</small></a></div>
+      <section class="panel"><div class="panel-head"><div><h2>Document flow</h2><p>${s.dataset_documents ? `${s.dataset_documents} dataset runs included · excluded from the payment ledger` : "Current business invoices"}</p></div><a class="btn btn-sm btn-ghost" href="#/invoices">All invoices</a></div>
         <div class="flow">
           <div class="flow-step"><small>Received</small><b>${s.documents}</b><small>documents</small></div>
-          <div class="flow-step"><small>Read</small><b>${s.documents - failed}</b><small>${failed ? `${failed} could not be read` : 'all readable'}</small></div>
+          <div class="flow-step"><small>Read</small><b>${s.documents - failed - (s.by_status.RUNNING?.count || 0)}</b><small>${s.by_status.RUNNING?.count ? `${s.by_status.RUNNING.count} still processing` : failed ? `${failed} could not be read` : 'completed reads'}</small></div>
           <div class="flow-step"><small>Checked</small><b>${s.decided + im.non_invoices}</b><small>against orders &amp; ledger</small></div>
           <div class="flow-out"><div class="split" role="img" aria-label="Outcome split">${outs.map((o) => o.value ? `<i class="${o.k}" style="width:${(o.value / outTotal) * 100}%" title="${o.label}: ${o.value}"></i>` : '').join('')}</div>
             <div class="keys">${outs.map((o) => `<span class="key"><i class="${o.k}"></i>${o.label} <b>${o.value}</b></span>`).join('')}</div></div>
@@ -283,12 +287,16 @@
       <div class="cols cols-2 mt">
         <section class="panel"><div class="panel-head"><div><h2>What stops invoices</h2><p><span class="key"><i class="warn"></i>sent to a person</span> &nbsp; <span class="key"><i class="bad"></i>rejected</span></p></div></div>
           <div class="panel-body">${s.stop_reasons.length ? `<div class="ranked">${s.stop_reasons.map((r) => `<div><span>${esc(r.label)}</span><span class="dots">${'<i class="w"></i>'.repeat(Math.min(r.review, 12))}${'<i class="b"></i>'.repeat(Math.min(r.rejected, 12))}</span><em>${r.review + r.rejected}</em></div>`).join('')}</div>` : '<p class="muted">Nothing has been stopped yet.</p>'}</div></section>
-        <section class="panel"><div class="panel-head"><div><h2>Where processing time goes</h2><p>Average per document, latest 200</p></div></div>
+        <section class="panel"><div class="panel-head"><div><h2>Processing speed</h2><p>Current scope · latest 200 completed documents · overlapping readers measured separately</p></div></div>
           <div class="panel-body">${segments.length ? `<div class="steps-bar">${segments.map((g) => `<i style="width:${(g.seconds / stepTotal) * 100}%;background:${g.color}" title="${esc(g.label)}: ${secs(g.seconds)}"></i>`).join('')}</div>
             <div class="steps-key">${segments.map((g) => `<span><i style="background:${g.color}"></i>${esc(g.label)}<em>${secs(g.seconds)}</em></span>`).join('')}</div>` : '<p class="muted">No timings yet.</p>'}
-            <p class="sublabel">Approved invoices by due date</p>
-            <div class="calendar">${s.aging.map((a) => `<div class="${a.bucket === 'Overdue' && a.count ? 'hot' : ''}"><small>${esc(a.bucket.replace('Due in ', ''))}</small><b>${a.count}</b><small>${moneyShort(a.value)}</small></div>`).join('')}</div></div></section>
+          </div></section>
+        <section class="panel"><div class="panel-head"><div><h2>Upcoming payments</h2><p>Approved invoices by due date</p></div></div><div class="panel-body"><div class="calendar">${s.aging.map((a) => `<div class="${a.bucket === 'Overdue' && a.count ? 'hot' : ''}"><small>${esc(a.bucket.replace('Due in ', ''))}</small><b>${a.count}</b><small>${moneyShort(a.value)}</small></div>`).join('')}</div></div></section>
       </div>`;
+    $('#overview-scope').addEventListener('change', (event) => go(`#/?scope=${event.target.value}`));
+    $('#refresh-overview').addEventListener('click', () => overviewPage(_args, _params, alive));
+    if (overviewTimer) clearTimeout(overviewTimer);
+    overviewTimer = setTimeout(() => { if (alive() && !document.hidden) overviewPage(_args, _params, alive); }, 15000);
   }
 
   /* ================= Bring in invoices ================= */
@@ -563,7 +571,10 @@
       for (const review of r.reviews || []) {
         if (['ISSUE_ACKNOWLEDGED', 'ISSUE_REOPENED'].includes(review.outcome)) acknowledgements[review.note] = review.outcome === 'ISSUE_ACKNOWLEDGED';
       }
-      const issueTick = (c) => `<label class="small"><input type="checkbox" data-issue="${esc(c.check)}" ${acknowledgements[c.check] ? 'checked' : ''}> Acknowledged</label> <button class="btn btn-sm" data-retry>Rerun</button>${['vendor_master','vendor_identity','payee_identified'].includes(c.check) && inv.vendor ? ' <button class="btn btn-sm" data-verify-vendor>Verify vendor &amp; rerun</button>' : ''}`;
+      const issueTick = (c) => `<div class="issue-actions"><label><input type="checkbox" data-issue="${esc(c.check)}" ${acknowledgements[c.check] ? 'checked' : ''}> ${acknowledgements[c.check] ? 'Acknowledged' : 'Mark reviewed'}</label>${['vendor_master','vendor_identity','payee_identified'].includes(c.check) && inv.vendor ? '<button class="btn btn-sm btn-ghost" data-verify-vendor>Verify vendor &amp; rerun</button>' : ''}</div>`;
+      const issueItem = (c) => `<li class="issue-item"><div class="issue-copy"><b>${esc(m.checks[c.check] || c.check.replaceAll('_', ' '))}</b><p>${esc(human(c.detail))}</p></div>${issueTick(c)}</li>`;
+      const blocking = checks.filter(c => !c.passed && c.outcome !== 'ADVISORY');
+      const advisory = checks.filter(c => c.outcome === 'ADVISORY');
       let verdict;
       if (r.status === 'RUNNING') {
         const current = m.stages.find((n) => latest[n]?.status === 'RUNNING') || 'Starting';
@@ -582,7 +593,7 @@
       } else if (r.status === 'REJECTED') {
         verdict = `<div class="verdict bad"><h3>Held back — not payable as sent</h3><ul class="reasons" style="margin-top:4px">${reasons.map((x) => `<li>${esc(human(x))}${checks.find((c) => c.detail === x) ? issueTick(checks.find((c) => c.detail === x)) : ''}</li>`).join('')}</ul><div class="row" style="margin-top:8px"><button class="btn btn-sm" data-email>Write to supplier</button></div></div>`;
       } else {
-        verdict = `<div class="verdict warn"><h3>Waiting on ${esc(rt?.team || 'AP Specialist')}${due(r) ? ` · ${esc(due(r).text)}` : ''}</h3><ul class="reasons" style="margin-top:4px">${reasons.map((x) => `<li>${esc(human(x))}${checks.find((c) => c.detail === x) ? issueTick(checks.find((c) => c.detail === x)) : ''}</li>`).join('') || '<li>Needs a person to confirm</li>'}</ul></div>`;
+        verdict = `<div class="verdict review-summary"><div class="row-between"><div><span class="kicker">Needs review</span><h3>${plural(blocking.length, 'blocking issue')}</h3><p>${esc(rt?.team || 'AP Specialist')}${due(r) ? ` · ${esc(due(r).text)}` : ''}</p></div><button class="btn btn-sm" data-retry>Rerun invoice</button></div><ul class="issue-list">${blocking.map(issueItem).join('')}</ul></div>${advisory.length ? `<details class="advisory-list"><summary>${plural(advisory.length, 'advisory')} · does not block approval</summary><ul class="issue-list">${advisory.map(issueItem).join('')}</ul></details>` : ''}`;
       }
       const issues = checks.filter((c) => c.outcome !== 'VERIFIED_PASS');
       const passed = checks.filter((c) => c.outcome === 'VERIFIED_PASS');

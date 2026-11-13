@@ -387,10 +387,10 @@ def reviewer_stats():
             .join(runs, runs.c.id == reviews.c.run_id)
             .where(reviews.c.outcome.in_(("APPROVED_BY_REVIEWER", "REJECTED_BY_REVIEWER")))).mappings()]
 
-def recent_stage_events(limit_runs=200):
+def recent_stage_events(limit_runs=200, run_ids=None):
     """Final stage events for the latest finished runs, for time-per-step."""
     with engine.connect() as conn:
-        ids = [r[0] for r in conn.execute(select(runs.c.id).where(runs.c.status != "RUNNING")
+        ids = [r[0] for r in conn.execute(select(runs.c.id).where(runs.c.status != "RUNNING", runs.c.id.in_(run_ids) if run_ids is not None else True)
                                           .order_by(runs.c.created_at.desc()).limit(limit_runs))]
         if not ids: return {}
         events = {}

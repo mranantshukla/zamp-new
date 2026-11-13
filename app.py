@@ -728,7 +728,7 @@ def analytics_summary():
     """AP operating metrics from indexed columns (no payload parsing)."""
     today = date.today()
     rows = [r for r in storage.analytics_rows(include_archived=request.args.get("archived") == "1")
-            if r["event_type"] != "dataset_evaluation"]
+            if request.args.get("scope") == "all" or r["event_type"] != "dataset_evaluation"]
     # Everything except filed non-invoices: unreadable/unknown documents are
     # candidate invoices that a person must handle, so they count and queue.
     invoices = [r for r in rows if r["routing"] != "NON_INVOICE"]
@@ -772,19 +772,21 @@ def analytics_summary():
                        "approved_by_reviewer": sum(1 for r in invoices if r["resolution"] == "APPROVED"),
                        "rejected_by_reviewer": sum(1 for r in invoices if r["resolution"] == "REJECTED"),
                        "non_invoices": sum(1 for r in rows if r["routing"] == "NON_INVOICE")}
-    # Time per step: gap between consecutive stage completions, so long OCR is
-    # attributed to OCR rather than to every stage that was "running" alongside.
+    # Measure each stage's own RUNNING-to-terminal interval; parallel readers
+    # must not inherit time from another stage or archived run.
     step_totals, step_counts = defaultdict(float), defaultdict(int)
-    for events in storage.recent_stage_events().values():
-        finals = {}
+    for events in storage.recent_stage_events(run_ids=[r["id"] for r in rows]).values():
+        starts, durations = {}, {}
         for e in events:
-            if e["status"] in ("COMPLETED", "BLOCKED", "SKIPPED", "FAILED"): finals[e["stage"]] = e["at"]
-        started = next((e["at"] for e in events if e["status"] == "RUNNING"), None)
-        previous = started
-        for name in STAGE_NAMES:
-            if name in finals and previous is not None:
-                step_totals[name] += max(0.0, (finals[name] - previous).total_seconds()); step_counts[name] += 1
-                previous = finals[name]
+            name = e["stage"]
+            if e["status"] == "RUNNING": starts[name] = e["at"]
+            elif e["status"] in ("COMPLETED", "BLOCKED", "FAILED") and name in starts:
+                durations[name] = max(0.0, (e["at"] - starts.pop(name)).total_seconds())
+        # These envelope stages contain reader durations; omit to avoid double counting.
+        for name, duration in durations.items():
+            if name in {"PDF text / OCR", "AI OCR reconciliation"}: continue
+            step_totals[name] += duration
+            step_counts[name] += 1
     reviewers = defaultdict(lambda: {"approved": 0, "rejected": 0, "seconds": []})
     for r in storage.reviewer_stats():
         entry = reviewers[r["reviewer"]]
@@ -795,7 +797,7 @@ def analytics_summary():
     seconds.sort()
     top = sorted(vendors.values(), key=lambda v: (-v["approved_value"], -v["invoices"]))[:10]
     return jsonify(
-        as_of=today.isoformat(), documents=len(rows), decided=decided, invoice_metrics=invoice_metrics,
+        as_of=today.isoformat(), scope=request.args.get("scope", "business"), dataset_documents=sum(r["event_type"] == "dataset_evaluation" for r in rows), documents=len(rows), decided=decided, invoice_metrics=invoice_metrics,
         touchless_rate=round(touchless / decided, 4) if decided else None,
         exception_rate=round((count("REJECTED") + count("PENDING_REVIEW")) / decided, 4) if decided else None,
         money_stopped=round(by_status["REJECTED"]["value"], 2),

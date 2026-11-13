@@ -356,7 +356,7 @@ def extract_invoice(text: str) -> dict:
         vendor = next((line for line in lines[lines.index(vendor) + 1:] if not re.search(r"gst|pan|tax|reg\.?\s*no", line, re.I)), vendor) if vendor in lines else vendor
     if not vendor:
         tax_invoice_index = next((i for i, line in enumerate(lines) if re.search(r"tax\s*invoice", line, re.I)), len(lines))
-        vendor = next((line for line in lines[:tax_invoice_index] if not re.search(r"plot|contact|email|gst|tax|address|original|copy|duplicat[elt]*|^duplicalt$", line, re.I) and len(line) > 2), None)
+        vendor = next((line for line in lines[:tax_invoice_index] if not re.search(r"plot|contact|email|gst|tax|address|original|copy|^(?:duplicate|duplicalt)(?:\s+copy)?$", line, re.I) and len(line) > 2), None)
     buyer = label_value(r"bill\s*to|to")
     if not buyer or not buyer.strip(" ,.-") or re.search(r"gst|invoice|address|reg\.?\s*no|^to[,.-]*$", buyer, re.I):
         to_index = next((i for i, line in enumerate(lines) if re.match(r"^\s*to\s*[, :.-]*$", line, re.I)), None)

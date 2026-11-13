@@ -271,7 +271,14 @@ def test_dataset_image_uses_original_ocr_not_labels():
     assert method == "ocr" and "VST/783" in text
 
 
-def test_existing_history_and_verification_preserved():
+def test_existing_history_and_verification_preserved(tmp_path, monkeypatch):
+    # run_history.json is gitignored local state, so build a legacy fixture
+    # rather than depending on whichever file happens to exist on this machine.
+    legacy = [{"time": f"2026-11-0{i}T10:00:00", "scenario": f"legacy_{i}.txt", "invoice_number": f"OLD-{i}",
+               "status": "APPROVED" if i % 2 else "PENDING_REVIEW"} for i in range(1, 7)]
+    runs_path = tmp_path / "run_history.json"; runs_path.write_text(json.dumps(legacy))
+    monkeypatch.setattr(dashboard, "RUNS", runs_path)
+    monkeypatch.setattr(dashboard, "VERIFIED", tmp_path / "manual_verification.json")
     assert len(dashboard.load_runs()) >= 6
     assert isinstance(dashboard.load_verified(), dict)
     markup = dashboard.page()

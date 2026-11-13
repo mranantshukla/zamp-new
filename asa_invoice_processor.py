@@ -7,7 +7,7 @@ Usage:
 from __future__ import annotations
 import argparse, csv, json, os, re, threading
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import date as date_type, datetime, timedelta
 from pathlib import Path
 from decision_policy import PolicyConfig, PASS, VIOLATION, UNCERTAIN, BLOCKED, resolve, sufficient_ocr_evidence
 
@@ -77,7 +77,10 @@ def extract_reference(lines, pattern):
         if not match: continue
         tail = line[match.end():].strip(" :#.-")
         candidates = [tail] if tail else []
-        if not candidates and i + 1 < len(lines): candidates.append(lines[i + 1].strip(" :#.-"))
+        # A blank label ("PO Number:") must not borrow the next field's label,
+        # e.g. "Subtotal: 400.00" would otherwise yield PO "Subtotal".
+        if not candidates and i + 1 < len(lines) and not re.match(r"^[A-Za-z][A-Za-z .()/&-]{1,40}:", lines[i + 1]):
+            candidates.append(lines[i + 1].strip(" :#.-"))
         for candidate in candidates:
             token = re.match(r"([A-Z0-9][A-Z0-9/_-]{3,})\b", candidate, re.I)
             if token and not re.search(r"^(?:number|order|supply|rter|date|und)$", token.group(1), re.I):
@@ -483,18 +486,36 @@ def extract_invoice(text: str) -> dict:
             "line_items": line_items, "raw_text": clean, "document_type": document_type,
             "field_metadata": {key: field_evidence(key, value) for key, value in fields.items() if value is not None}}
 
+DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d-%b-%Y", "%d-%B-%Y")
+
+def parse_date(value) -> date_type | None:
+    """Parse the date formats accepted by extraction; None when unparseable."""
+    for fmt in DATE_FORMATS:
+        try: return datetime.strptime(str(value or "").strip(), fmt).date()
+        except ValueError: pass
+    return None
+
+def prepare_pos(rows) -> list[dict]:
+    """Copy PO master rows with numeric amounts and an opening balance."""
+    prepared = []
+    for r in rows:
+        r = dict(r)
+        for k in ("po_amount", "invoiced_to_date"):
+            r[k] = float(r.get(k) or 0)
+        r["remaining"] = r["po_amount"] - r["invoiced_to_date"]
+        prepared.append(r)
+    return prepared
+
 def load_pos(path: Path) -> list[dict]:
     with path.open(newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-    for r in rows:
-        for k in ("po_amount", "invoiced_to_date"):
-            r[k] = float(r[k])
-        r["remaining"] = r["po_amount"] - r["invoiced_to_date"]
-    return rows
+        return prepare_pos(csv.DictReader(f))
 
-def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path=None, history_rows=None):
+def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path=None, history_rows=None,
+           pos=None, vendor_master=None, today=None):
+    """``pos``/``vendor_master`` override the CSV files (master data stored in
+    the database); ``today`` is injectable for deterministic tests."""
     policy = PolicyConfig.from_environment()
-    pos = load_pos(po_path)
+    pos = prepare_pos(pos) if pos is not None else load_pos(po_path)
     history = history_rows if history_rows is not None else (json.loads(history_path.read_text(encoding="utf-8")) if history_path and history_path.exists() else [])
     if not isinstance(history, list): history = []
     history = [row for row in history if row.get("event_type") != "dataset_evaluation"]
@@ -521,8 +542,10 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
     check("po_match", po is not None, po_detail, "review")
     if po and str(po.get("status") or "").upper() in ("BLOCKED", "CLOSED", "PROHIBITED"):
         check("po_authorisation", False, f"PO {po['po_number']} is {po['status']}")
-    master_path = vendor_master_path or po_path.with_name("vendor_master.csv")
-    if master_path.exists():
+    master_path = vendor_master_path or (po_path.with_name("vendor_master.csv") if po_path else None)
+    if vendor_master is not None:
+        master = [dict(m) for m in vendor_master]
+    elif master_path and master_path.exists():
         with master_path.open(newline="", encoding="utf-8") as f: master = list(csv.DictReader(f))
     else:
         master = [{"vendor": p["vendor"], "gstin": p.get("gstin", "")} for p in pos]
@@ -557,6 +580,24 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
           "Same vendor and invoice number already approved or paid")
     if repeated_pending:
         check("duplicate_submission", False, "Previously submitted invoice is still pending review", "review")
+    # Double-billing control: an approved/paid bill from the same vendor with the
+    # same amount, date and PO under a *different* number is a likely re-issue.
+    # It is routed to a person, not rejected: legitimate repeat orders exist.
+    if not duplicate and key[0] and inv.get("total") is not None and parse_date(inv.get("date")):
+        lookalikes = [r for r in history if r.get("status") in ("APPROVED", "PAID")
+                      and normalize_identity(r.get("vendor")) == key[0]
+                      and normalize_identity(r.get("invoice_number")) != key[1]
+                      and r.get("total") is not None and abs(float(r["total"]) - float(inv["total"])) <= 0.01
+                      and parse_date(r.get("date")) == parse_date(inv.get("date"))
+                      and normalize_identity(r.get("po_number")) == normalize_identity(inv.get("po_number"))]
+        if lookalikes:
+            check("possible_duplicate", False,
+                  f"Possible duplicate: {len(lookalikes)} approved invoice(s) from this vendor share amount, "
+                  f"date and PO under a different invoice number", "review")
+    invoice_date = parse_date(inv.get("date"))
+    reference_day = today or date_type.today()
+    if invoice_date and invoice_date > reference_day + timedelta(days=1):
+        check("invoice_date_future", False, f"Invoice date {inv.get('date')} is in the future", "review")
     if po and inv.get("total") is not None:
         prior = sum(float(r.get("total") or 0) for r in history if r.get("status") == "APPROVED" and normalize_identity(r.get("po_number")) == normalize_identity(po["po_number"]) and r.get("total") is not None)
         remaining = max(0, po["remaining"] - prior)

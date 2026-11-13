@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import time
 from urllib.error import HTTPError
 from concurrent.futures import ThreadPoolExecutor
@@ -17,7 +18,11 @@ import ai_extraction
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    engine = create_engine("sqlite:///" + str(tmp_path / "test.db").replace("\\", "/"), future=True)
+    # TEST_DATABASE_URL (e.g. postgresql+psycopg://localhost/asa_test) runs the
+    # same suite against PostgreSQL; each test starts from an empty schema.
+    url = os.getenv("TEST_DATABASE_URL")
+    engine = create_engine(url or "sqlite:///" + str(tmp_path / "test.db").replace("\\", "/"), future=True)
+    if url: storage.meta.drop_all(engine)
     monkeypatch.setattr(storage, "engine", engine)
     storage.initialize()
     monkeypatch.setattr(web, "ROOT", tmp_path)

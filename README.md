@@ -7,7 +7,8 @@ An accounts payable case study that reads PDF or image bills, extracts invoice f
 - `asa_invoice_processor.py`: embedded PDF text, scanned-page rendering, RapidOCR, classification, extraction, GSTIN and financial checks.
 - `decision_policy.py`: deterministic three-outcome policy and configurable PO tolerance/OCR evidence grade.
 - `app.py`: Flask dashboard, live stage stream, preview, history, review and sample evaluation.
-- `storage.py`: SQLAlchemy persistence for document bytes, runs, stages and reviews. PostgreSQL on Render; SQLite locally.
+- `storage.py`: SQLAlchemy persistence for document bytes, runs, stages and reviews. PostgreSQL on Render; SQLite locally. Schema v2 adds indexed summary columns (vendor/invoice/PO keys, total, dates, routing, archived) so duplicate and PO-balance lookups touch only related rows; existing v1 databases are migrated additively on start-up.
+- `master_data.py`: validated PO and vendor master lists stored in the database (falling back to `samples/pos.csv` and `samples/vendor_master.csv`).
 - Successful OCR text is cached in the same database by document hash and OCR settings. Repeated uploads reuse OCR but always rerun vendor, PO, duplicate and financial decisions. Failed OCR is never cached.
 - `asa_dashboard.py`: preserved legacy `Handler` for compatibility tests. Running the file starts the new Flask dashboard. `backend/` is an unused older prototype.
 
@@ -40,6 +41,7 @@ The old text sample lacks subtotal and routes to review under the current policy
 | `PO_TOLERANCE_PCT` | Fractional overage allowance, default `0`, maximum `0.05`. |
 | `OCR_MIN_RELIABILITY` | `DIRECT_LABEL` (default) or `MANUALLY_VERIFIED`; ordinal evidence grade, not calibrated confidence. |
 | `PORT` | Production port from Render; local command accepts `--port`. |
+| `PROCESSING_WORKERS` | Background processing threads, default `2`, maximum `8`. OCR is serialised, so extra workers mainly help PDF-text documents; batch uploads queue behind this pool. |
 | `AI_REVIEW_API_URL`, `AI_REVIEW_MODEL`, `AI_REVIEW_API_KEY` | Persistent AI provider configuration via server environment. The dashboard settings form only changes the running process. |
 
 ## Decision policy
@@ -56,7 +58,14 @@ Run `python make_demo_assets.py` to recreate six fictional files in `samples/dem
 
 ```powershell
 python -m pip install pytest
-python -m pytest -q test_regressions.py test_app.py
+python -m pytest -q test_regressions.py test_app.py test_features.py
+```
+
+To run the database-backed tests against PostgreSQL as well, point `TEST_DATABASE_URL` at an empty UTF-8 database (each test drops and recreates the schema):
+
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+psycopg://postgres@localhost:5432/asa_test"
+python -m pytest -q test_app.py test_features.py
 ```
 
 Optional, idempotent legacy JSON import: set `DATABASE_URL`, then run `python migrate_legacy.py`. It reads `run_history.json` and `manual_verification.json` without deleting them. Legacy checks retain no invented reviewer identity.
@@ -65,9 +74,19 @@ Optional, idempotent legacy JSON import: set `DATABASE_URL`, then run `python mi
 
 `render.yaml` defines a Python web service, PostgreSQL, `/healthz`, generated secret, and demo login variables. Connect this repository through Render Blueprint, supply `DEMO_USERNAME` and `DEMO_PASSWORD`, and test the resulting URL. See `DEPLOYMENT.md`.
 
+## AP controls and workspace features
+
+- **Master data** view: upload PO and vendor master CSVs (validated: required columns, non-negative amounts, unique POs/vendors, GSTIN checksum, known statuses). PO rows show utilisation from approved invoices. Changes apply to future decisions only. API: `GET/PUT /api/master/{po_master|vendor_master}`, `GET /api/master/<kind>.csv`.
+- **Possible-duplicate control**: an approved invoice from the same vendor with the same amount, invoice date and PO under a different invoice number routes to review (`possible_duplicate`). Exact vendor + number duplicates are still rejected.
+- **Future-dated invoices** (more than one day ahead) route to review (`invoice_date_future`).
+- **Analytics**: `GET /api/analytics/summary` provides invoice metrics, touchless and exception rates, payables aging of approved invoices by due date, top vendors and processing-time median/p95. Dashboard tiles use it, so they cover all runs instead of the latest page.
+- **Audit record**: `GET /api/runs/<id>/audit.json` downloads the decision evidence, stage trace and reviews for one run.
+- **Records API**: `GET /api/runs` returns slim summaries with the latest review, filters status/date in SQL, accepts `limit`/`offset`, and reports `X-Total-Count`. Full evidence stays at `/api/runs/<id>`.
+- **Hardening**: login is throttled after 5 failures in 5 minutes per client address; responses carry `nosniff`, `SAMEORIGIN` framing and `same-origin` referrer headers; large text responses are gzip-compressed.
+
 ## Known limits
 
-The workspace supports batch intake (up to 25 files per request), an operational Inbox, searchable records, Excel and CSV exports, vendor summaries derived from run history, a dedicated exception-review workspace, and review notes for selected invoices. A batch review preserves the automated decision and records the supplied reviewer identity and note. The interface sections share the Flask application; they are not separate server deployments. Email ingestion, accounting sync, scheduled notifications, team roles, and PDF coordinate highlighting are not implemented; they require provider credentials, account mapping, and document location evidence. Vendor summaries do not replace vendor-master approval.
+The workspace supports batch intake (up to 25 files per request), an operational Inbox, searchable records, Excel and CSV exports, vendor summaries derived from run history, a dedicated exception-review workspace, and review notes for selected invoices. A batch review preserves the automated decision and records the supplied reviewer identity and note. The interface sections share the Flask application; they are not separate server deployments. Email ingestion, accounting sync, scheduled notifications, team roles, payment scheduling, and PDF coordinate highlighting are not implemented; they require provider credentials, account mapping, and document location evidence. Vendor summaries do not replace vendor-master approval.
 
 The heuristic extractor remains weak on real bills: the current 22-image AjitRawat benchmark is **30/90 exact comparable fields (33.3%)**. OCR evidence grades are structural, not calibrated confidence. GST checks do not establish tax-law compliance. Interrupted runs are marked `FAILED` after a worker restart. Schema version 1 is initialized additively; future changes need a migration framework. Render free web services spin down and free Postgres expires after 30 days.
 

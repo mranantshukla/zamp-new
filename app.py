@@ -9,16 +9,20 @@ import os
 import threading
 import time
 import csv
+import gzip
 import io
 import zipfile
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from xml.sax.saxutils import escape as xml_escape
-from datetime import timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template_string, request, session, url_for
 from werkzeug.utils import secure_filename
 
 import storage
+import master_data
 import asa_invoice_processor as processor
 from asa_invoice_processor import classify_document, extract_invoice, read_document
 from asa_dashboard import dataset_rows, dataset_image_bytes, evaluate_dataset
@@ -36,8 +40,34 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("asa")
 if os.getenv("RENDER") and (not os.getenv("DEMO_USERNAME") or not os.getenv("DEMO_PASSWORD") or not os.getenv("APP_SECRET")):
     raise RuntimeError("APP_SECRET, DEMO_USERNAME and DEMO_PASSWORD are required in deployment")
+if os.getenv("RENDER"):
+    # Render terminates TLS at one proxy hop; trust exactly that hop so login
+    # throttling keys on the client address rather than the proxy's.
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 storage.initialize()
 storage.recover_interrupted()
+
+# OCR inference is already serialized by a process-wide lock, so extra threads
+# only add memory pressure. A bounded pool queues batch uploads instead of
+# starting up to 25 concurrent threads that each hold document bytes.
+PROCESSING_WORKERS = max(1, min(8, int(os.getenv("PROCESSING_WORKERS", "2"))))
+executor = ThreadPoolExecutor(max_workers=PROCESSING_WORKERS, thread_name_prefix="asa-run")
+
+def submit_run(*args):
+    executor.submit(process_run, *args)
+
+LOGIN_WINDOW_SECONDS, LOGIN_MAX_FAILURES = 300, 5
+login_failures = defaultdict(deque)
+login_lock = threading.Lock()
+
+def _login_blocked(key):
+    cutoff = time.monotonic() - LOGIN_WINDOW_SECONDS
+    with login_lock:
+        attempts = login_failures[key]
+        while attempts and attempts[0] < cutoff: attempts.popleft()
+        if not attempts: login_failures.pop(key, None)
+        return len(attempts) >= LOGIN_MAX_FAILURES
 
 # The secret is deliberately runtime-only: it is never sent back to the browser,
 # stored in run history, or committed to source control.  Environment variables
@@ -63,6 +93,27 @@ def guard():
     if request.method in ("POST", "PUT", "DELETE") and request.headers.get("X-CSRF-Token") != session.get("csrf"):
         abort(403)
 
+COMPRESSIBLE = ("application/json", "text/html", "text/csv", "text/css", "application/javascript", "text/javascript")
+
+@app.after_request
+def finalize_response(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    # Compress large text responses: /api/runs is the dashboard's heaviest call.
+    if (response.direct_passthrough or response.is_streamed or response.status_code < 200
+            or response.status_code >= 300 or "Content-Encoding" in response.headers
+            or response.mimetype not in COMPRESSIBLE
+            or "gzip" not in request.headers.get("Accept-Encoding", "").lower()):
+        return response
+    data = response.get_data()
+    if len(data) < 1024: return response
+    response.set_data(gzip.compress(data, compresslevel=5))
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Length"] = str(len(response.get_data()))
+    response.vary.add("Accept-Encoding")
+    return response
+
 @app.route("/healthz")
 def healthz():
     try:
@@ -73,13 +124,18 @@ def healthz():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
+        key = request.remote_addr or "unknown"
+        if _login_blocked(key):
+            return render_template_string(LOGIN_HTML, error="Too many failed attempts. Try again in a few minutes."), 429
         user = os.getenv("DEMO_USERNAME", "")
         password = os.getenv("DEMO_PASSWORD", "")
         if user and password and hmac.compare_digest(request.form.get("username", ""), user) and hmac.compare_digest(request.form.get("password", ""), password):
             session.clear(); session["authenticated"] = True
             session.permanent = True
             session["csrf"] = os.urandom(24).hex()
+            with login_lock: login_failures.pop(key, None)
             return redirect(url_for("index"))
+        with login_lock: login_failures[key].append(time.monotonic())
         return render_template_string(LOGIN_HTML, error="Invalid credentials"), 401
     return render_template_string(LOGIN_HTML, error="")
 
@@ -188,7 +244,8 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
                 ("History persistence", "COMPLETED", f"Run completed in {time.monotonic()-started:.2f}s"),
             ]
             return extra, final_stages
-        storage.locked_decision(rid, invoice, ROOT / "samples" / "pos.csv", method, finalize=finalize)
+        storage.locked_decision(rid, invoice, ROOT / "samples" / "pos.csv", method, finalize=finalize,
+                                masters=master_data.decision_masters(ROOT / "samples"))
     except Exception as exc:
         log.exception("run %s failed at %s", rid, current)
         stage(rid, current, "FAILED", str(exc)[:240])
@@ -208,7 +265,7 @@ def create_upload():
     try: name, mime = validate_file(file.filename, raw)
     except ValueError as exc: return jsonify(error=str(exc)), 400
     rid = storage.create_run(name, "upload", raw, mime)
-    threading.Thread(target=process_run, args=(rid, raw, Path(name).suffix), daemon=True).start()
+    submit_run(rid, raw, Path(name).suffix)
     return jsonify(run_id=rid), 202
 
 @app.post('/api/runs/bulk')
@@ -227,7 +284,7 @@ def create_bulk_upload():
     for name, mime, raw in prepared:
         rid = storage.create_run(name, 'upload', raw, mime)
         created.append({'run_id': rid, 'source': name})
-        threading.Thread(target=process_run, args=(rid, raw, Path(name).suffix), daemon=True).start()
+        submit_run(rid, raw, Path(name).suffix)
     return jsonify(runs=created), 202
 
 @app.post("/api/samples/<int:index>")
@@ -239,21 +296,37 @@ def create_sample(index):
     rid = storage.create_run(f"Indian GST invoice {index+1:02d}", "dataset_evaluation", raw, "image/jpeg")
     # Ground truth remains outside process_run's extraction and decision inputs.
     label = json.loads(rows[index]["row"]["ground_truth"]).get("gt_parse", {}).get("header", {})
-    threading.Thread(target=process_run, args=(rid, raw, ".jpg", "dataset_evaluation", label), daemon=True).start()
+    submit_run(rid, raw, ".jpg", "dataset_evaluation", label)
     return jsonify(run_id=rid), 202
+
+RUN_STATUSES = {"RUNNING", "APPROVED", "REJECTED", "PENDING_REVIEW", "FAILED"}
+SEARCH_FIELDS = ("source", "vendor", "invoice_number", "po_number", "gstin", "status", "run_id")
+
+def _int_arg(name, default, low, high):
+    try: return max(low, min(high, int(request.args.get(name, default))))
+    except ValueError: return default
 
 @app.get("/api/runs")
 def runs_api():
-    rows = storage.list_runs()
+    """Slim, newest-first run summaries. Status/date filters and pagination run
+    in SQL; open /api/runs/<id> for full evidence. ``X-Total-Count`` reports the
+    status/date-filtered total."""
     decision = request.args.get("decision", "").upper()
-    vendor = request.args.get("vendor", "").casefold()
+    if decision and decision not in RUN_STATUSES: return jsonify(error="Unknown decision filter"), 400
+    vendor = request.args.get("vendor", "").strip().casefold()[:120]
     query = request.args.get('q', '').strip().casefold()[:120]
-    date = request.args.get("date", "")
-    rows = [r for r in rows if (not decision or r["status"] == decision) and
-            (not vendor or vendor in str(r.get("vendor") or "").casefold()) and
-            (not query or any(query in str(r.get(k) or '').casefold() for k in ('source','vendor','invoice_number','po_number','gstin','status','run_id'))) and
-            (not date or r["time"].startswith(date))]
-    return jsonify(rows)
+    day = None
+    if request.args.get("date"):
+        try: day = date.fromisoformat(request.args["date"])
+        except ValueError: return jsonify(error="date must be YYYY-MM-DD"), 400
+    limit, offset = _int_arg("limit", 300, 1, 1000), _int_arg("offset", 0, 0, 10**7)
+    rows = storage.list_runs(limit=limit, offset=offset, status=decision or None, day=day,
+                             search=query or vendor or None, slim=True)
+    rows = [r for r in rows if (not vendor or vendor in str(r.get("vendor") or "").casefold()) and
+            (not query or any(query in str(r.get(k) or '').casefold() for k in SEARCH_FIELDS))]
+    response = jsonify(rows)
+    response.headers["X-Total-Count"] = str(storage.count_runs(status=decision or None, day=day))
+    return response
 
 @app.get('/api/runs/export.csv')
 def export_runs():
@@ -334,16 +407,18 @@ def run_api(rid):
 
 @app.get("/api/runs/<rid>/events")
 def events(rid):
-    if not storage.get_run(rid): abort(404)
+    if not storage.run_status(rid): abort(404)
     def generate():
-        seen = 0
+        # Two indexed queries per poll (new stage rows + status) instead of
+        # reloading the whole run, its payload, stages and reviews every second.
+        last_id = 0
         for _ in range(900):
-            row = storage.get_run(rid)
-            events = row["stages"]
-            for item in events[seen:]: yield "data: " + json.dumps(item, default=str) + "\n\n"
-            seen = len(events)
-            if row["status"] != "RUNNING":
-                yield "event: finished\ndata: " + json.dumps({"status":row["status"]}) + "\n\n"
+            status = storage.run_status(rid)
+            for item in storage.stages_after(rid, last_id):
+                last_id = item.pop("id")
+                yield "data: " + json.dumps(item, default=str) + "\n\n"
+            if status != "RUNNING":
+                yield "event: finished\ndata: " + json.dumps({"status": status}) + "\n\n"
                 break
             time.sleep(1.0)
     return Response(generate(), mimetype="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
@@ -379,8 +454,12 @@ def review_api(rid):
             amended["field_metadata"][field] = {"value":value, "evidence":note, "method":"manual_review",
                                                  "reliability":"MANUALLY_VERIFIED", "validation_status":"CORRECTED",
                                                  "manual_correction":True}
-        history = [r for r in storage.list_runs(include_archived=True) if r["run_id"] != rid]
-        revised = decide(amended, ROOT / "samples" / "pos.csv", method="ocr", history_rows=history).__dict__
+        # Same ledger scope as the live decision: every related completed run,
+        # archived or not, excluding this run itself.
+        history = storage.decision_history(amended, exclude=rid)
+        masters = master_data.decision_masters(ROOT / "samples")
+        revised = decide(amended, ROOT / "samples" / "pos.csv", method="ocr", history_rows=history,
+                         pos=masters.get("po_master"), vendor_master=masters.get("vendor_master")).__dict__
     storage.record_review(rid, reviewer, outcome, note, corrections, revised)
     return jsonify(saved=True, automated_decision=row["status"], revised_review_result=revised)
 
@@ -399,6 +478,97 @@ def bulk_review_api():
             storage.record_review(rid, reviewer, outcome, note, {})
             saved += 1
     return jsonify(saved=saved, note='Review notes saved. Automated payment decisions remain unchanged.')
+
+@app.get("/api/runs/<rid>/audit.json")
+def audit_export(rid):
+    """Self-contained audit record: decision evidence, stage trace and reviews."""
+    row = storage.get_run(rid)
+    if not row: abort(404)
+    body = json.dumps({"exported_at": datetime.now(timezone.utc).isoformat(), "run": row}, default=str, indent=2)
+    return Response(body, mimetype="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="asa_audit_{secure_filename(rid)}.json"'})
+
+@app.get("/api/master/<kind>")
+def master_get(kind):
+    if kind not in master_data.KINDS: abort(404)
+    try: rows, info = master_data.load(kind, ROOT / "samples")
+    except master_data.MasterDataError as exc: return jsonify(error=str(exc), errors=exc.errors), 500
+    if kind == "po_master" and rows:
+        # PO utilisation: opening balance less approved invoices in the ledger.
+        approved = storage.approved_by_po()
+        for row in rows:
+            value, count = approved.get(storage._key(row["po_number"]), (0.0, 0))
+            row["approved_value"], row["approved_invoices"] = round(value, 2), count
+            row["remaining"] = round(row["po_amount"] - row["invoiced_to_date"] - value, 2)
+            row["utilisation"] = round((row["invoiced_to_date"] + value) / row["po_amount"], 4) if row["po_amount"] else None
+    return jsonify(kind=kind, rows=rows or [], **info)
+
+@app.get("/api/master/<kind>.csv")
+def master_csv(kind):
+    if kind not in master_data.KINDS: abort(404)
+    rows, _ = master_data.load(kind, ROOT / "samples")
+    return Response(master_data.to_csv(kind, rows or []), mimetype="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{kind}.csv"'})
+
+@app.put("/api/master/<kind>")
+def master_put(kind):
+    """Replace a master list from CSV. Affects future decisions only; recorded
+    decisions are immutable."""
+    if kind not in master_data.KINDS: abort(404)
+    data = request.get_json(silent=True) or {}
+    content, updated_by = data.get("csv"), str(data.get("updated_by") or "").strip()[:80]
+    if not isinstance(content, str) or not content.strip(): return jsonify(error="CSV content is required"), 400
+    if not updated_by: return jsonify(error="Enter who is making this change"), 400
+    try: rows = master_data.save(kind, content, updated_by)
+    except master_data.MasterDataError as exc: return jsonify(error=str(exc), errors=exc.errors), 400
+    log.info("%s replaced by %s: %s rows", kind, updated_by, len(rows))
+    return jsonify(saved=len(rows), note="Applies to invoices processed from now on; existing decisions are unchanged.")
+
+AGING_BUCKETS = ("Overdue", "Due in 0-7 days", "Due in 8-30 days", "Due in 31+ days", "No due date")
+
+@app.get("/api/analytics/summary")
+def analytics_summary():
+    """AP operating metrics from indexed columns (no payload parsing)."""
+    today = date.today()
+    rows = [r for r in storage.analytics_rows(include_archived=request.args.get("archived") == "1")
+            if r["event_type"] != "dataset_evaluation"]
+    by_status = defaultdict(lambda: {"count": 0, "value": 0.0})
+    aging = {name: {"count": 0, "value": 0.0} for name in AGING_BUCKETS}
+    vendors = defaultdict(lambda: {"vendor": None, "invoices": 0, "approved_value": 0.0, "exceptions": 0})
+    seconds = []
+    for r in rows:
+        bucket = by_status[r["status"]]; bucket["count"] += 1; bucket["value"] += r["total"] or 0
+        if r["processing_seconds"] is not None: seconds.append(r["processing_seconds"])
+        if r["vendor_key"]:
+            v = vendors[r["vendor_key"]]; v["vendor"] = v["vendor"] or r["vendor"]; v["invoices"] += 1
+            if r["status"] == "APPROVED": v["approved_value"] += r["total"] or 0
+            if r["status"] in ("PENDING_REVIEW", "REJECTED"): v["exceptions"] += 1
+        if r["status"] == "APPROVED":
+            due = processor.parse_date(r["due_date"])
+            name = ("No due date" if not due else "Overdue" if due < today else "Due in 0-7 days"
+                    if (due - today).days <= 7 else "Due in 8-30 days" if (due - today).days <= 30 else "Due in 31+ days")
+            aging[name]["count"] += 1; aging[name]["value"] += r["total"] or 0
+    decided = sum(by_status[s]["count"] for s in ("APPROVED", "REJECTED", "PENDING_REVIEW"))
+    # Tile metrics mirror the dashboard's definitions: non-invoices are counted
+    # separately and excluded from approval/exception rates and invoice value.
+    invoices = [r for r in rows if (r["routing"] or "INVOICE_AP_WORKFLOW") == "INVOICE_AP_WORKFLOW"]
+    inv_count = lambda status: sum(1 for r in invoices if r["status"] == status)
+    inv_decided = sum(inv_count(s) for s in ("APPROVED", "REJECTED", "PENDING_REVIEW"))
+    invoice_metrics = {"invoices": len(invoices), "value": round(sum(r["total"] or 0 for r in invoices), 2),
+                       "approved": inv_count("APPROVED"), "pending": inv_count("PENDING_REVIEW"),
+                       "rejected": inv_count("REJECTED"), "decided": inv_decided,
+                       "non_invoices": sum(1 for r in rows if r["routing"] == "NON_INVOICE")}
+    seconds.sort()
+    top = sorted(vendors.values(), key=lambda v: (-v["approved_value"], -v["invoices"]))[:10]
+    return jsonify(
+        as_of=today.isoformat(), documents=len(rows), decided=decided, invoice_metrics=invoice_metrics,
+        touchless_rate=round(invoice_metrics["approved"] / inv_decided, 4) if inv_decided else None,
+        exception_rate=round((invoice_metrics["rejected"] + invoice_metrics["pending"]) / inv_decided, 4) if inv_decided else None,
+        by_status={k: {"count": v["count"], "value": round(v["value"], 2)} for k, v in by_status.items()},
+        aging=[{"bucket": k, "count": v["count"], "value": round(v["value"], 2)} for k, v in aging.items()],
+        top_vendors=[{**v, "approved_value": round(v["approved_value"], 2)} for v in top],
+        processing_seconds={"median": seconds[len(seconds) // 2] if seconds else None,
+                            "p95": seconds[min(len(seconds) - 1, int(len(seconds) * 0.95))] if seconds else None})
 
 @app.get("/")
 def index():
@@ -443,18 +613,18 @@ def index():
     return html.replace("</body>", ai_ui + "<script src='/static/experience.js' defer></script></body>", 1)
 
 LOGIN_HTML = """<!doctype html><title>Sign in · ASA</title><main style='font:16px Arial;max-width:360px;margin:15vh auto'><h1>Invoice intelligence</h1><p>Sign in to view invoice records.</p><form method=post><input name=username placeholder=Username required><input name=password type=password placeholder=Password required><button>Sign in</button></form><p>{{error}}</p></main>"""
-INDEX_HTML = """<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>ASA Invoice Intelligence</title><style>{{ css }}</style><style>
+INDEX_HTML = """<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>ASA Invoice Intelligence</title><style>{{ css|safe }}</style><style>
 body{margin:0;background:#f6f6f1;color:#182018;font:15px Arial,sans-serif}.shell{display:grid;grid-template-columns:94px 1fr;min-height:100vh}.side{background:#171a15;color:#ffec72;padding:25px 15px}.logo{font-size:30px;font-weight:900}.side a{display:block;color:#fff;text-decoration:none;margin:42px 0}.content{padding:28px 3vw;max-width:1500px}.hero{background:#ffec72;border-radius:24px;padding:30px 36px;margin-bottom:22px}.hero h1{font-size:32px;margin:0}.hero p{margin-bottom:0}.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.metric,.card{background:#fff;border:1px solid #e9e9dd;border-radius:20px;padding:22px}.metric b{display:block;font-size:25px;margin-top:10px}.grid{display:grid;grid-template-columns:minmax(300px,420px) 1fr;gap:22px;margin:22px 0}.card h2{margin:0 0 16px}.eyebrow{font-size:11px;letter-spacing:2px;color:#777c68;font-weight:800}.tabs{display:flex;gap:8px;margin:16px 0}.tabs button,.button{border:0;border-radius:12px;background:#ffec72;color:#1a1a13;padding:12px 16px;font-weight:800;cursor:pointer}input,select,textarea{box-sizing:border-box;width:100%;padding:12px;margin:7px 0 13px;border:1px solid #d9ddcb;border-radius:10px;background:white}.upload{border:2px dashed #cdd1bd;border-radius:15px;padding:18px}.preview{height:350px;width:100%;object-fit:contain;background:#fafaf5;border:1px solid #e7e8db;border-radius:12px}.timeline{display:grid;gap:6px;max-height:380px;overflow:auto}.stage{display:flex;justify-content:space-between;border-bottom:1px solid #eee;padding:9px}.stage small{color:#6b7562}.cols{display:grid;grid-template-columns:1fr 1fr;gap:20px}.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px;border-bottom:1px solid #eceee7;white-space:nowrap}th{color:#6b7562;font-size:11px;text-transform:uppercase}.badge{display:inline-block;border-radius:20px;padding:6px 10px;background:#eee}.APPROVED{background:#dff4e9;color:#147148}.REJECTED,.FAILED{background:#ffe3e3;color:#a52727}.PENDING_REVIEW{background:#fff2c7;color:#84630d}.muted{color:#677169}.error{color:#b02727}.details{white-space:pre-wrap;max-height:350px;overflow:auto}.review{margin-top:18px}.hide{display:none}@media(max-width:850px){.shell{grid-template-columns:1fr}.side{display:none}.grid,.cols,.metrics{grid-template-columns:1fr}.content{padding:15px}}
-</style></head><body><div class='shell'><aside class='side'><div class='logo'>Z</div><a href='#upload'>◇</a><a href='#history'>◷</a></aside><main class='content'><section class='hero'><span class='eyebrow'>ZAMP · ACCOUNTS PAYABLE</span><h1>Your bills, under control.</h1><p>Read documents, validate procurement evidence and route exceptions.</p></section><div class='metrics' id='metrics'></div><div class='grid'><section class='card' id='upload'><span class='eyebrow'>NEW RUN</span><h2>Add a bill</h2><div class='tabs'><button id='uploadtab'>Upload from computer</button><button id='sampletab'>Select from dataset</button></div><form id='uploadform' class='upload'><input type=file name=invoice_file accept='.pdf,.png,.jpg,.jpeg' required><button class='button'>Fetch bill details →</button></form><form id='sampleform' class='hide'><select id='sample'>{% for i,name in samples %}<option value='{{i}}'>{{name}}</option>{% endfor %}</select><button class='button'>Fetch dataset bill →</button></form><p class='muted'>PDF, PNG or JPEG · Up to 8 MB</p><p id='error' class='error'></p></section><section class='card'><span class='eyebrow'>LIVE ACTIVITY</span><h2>Run monitor</h2><div class='cols'><div><div id='timeline' class='timeline'><p class='muted'>Choose a bill to begin.</p></div></div><div><div id='previewempty' class='muted'>The source bill appears here.</div><iframe id='previewpdf' class='preview hide' title='Bill preview'></iframe><img id='previewimg' class='preview hide' alt='Bill preview'></div></div></section></div><section class='card hide' id='result'><span class='eyebrow'>DECISION EVIDENCE</span><h2 id='resulttitle'></h2><div id='reason'></div><div class='cols'><div><h3>Extracted fields</h3><div id='fields' class='tablewrap'></div><h3>PO matching</h3><div id='po'></div></div><div><h3>Financial validation</h3><div id='finance'></div><h3>Dataset evaluation</h3><div id='evaluation'></div></div></div><div class='review'><h3>Manual document review</h3><p class='muted'>Verification does not authorise payment. Corrections preserve the automated decision.</p><input id='reviewer' placeholder='Reviewer name'><select id='outcome'><option value='VERIFIED'>Verified against source</option><option value='NEEDS_CORRECTION'>Needs correction</option></select><textarea id='corrections' placeholder='Corrected fields as JSON, e.g. {"total": 1000}'></textarea><textarea id='note' placeholder='Review note'></textarea><button id='savereview' class='button'>Save review</button><p id='reviewmessage'></p><div id='reviews'></div></div></section><section class='card' id='history'><span class='eyebrow'>AUDIT TRAIL</span><h2>Processing history</h2><div class='cols'><select id='decisionfilter'><option value=''>All decisions</option><option>APPROVED</option><option>REJECTED</option><option>PENDING_REVIEW</option><option>FAILED</option></select><input id='vendorfilter' placeholder='Filter by vendor'></div><input id='datefilter' type=date><div class='tablewrap'><table><thead><tr><th>Time</th><th>Run ID</th><th>Type</th><th>Vendor</th><th>Seller GSTIN</th><th>Invoice</th><th>PO</th><th>Total</th><th>Method</th><th>Accuracy</th><th>Decision</th><th>Reason</th><th>Manual check</th></tr></thead><tbody id='historyrows'></tbody></table></div></section></main></div><script>
+</style></head><body><div class='shell'><aside class='side'><div class='logo'>Z</div><a href='#upload'>◇</a><a href='#history'>◷</a></aside><main class='content'><section class='hero'><span class='eyebrow'>ZAMP · ACCOUNTS PAYABLE</span><h1>Your bills, under control.</h1><p>Read documents, validate procurement evidence and route exceptions.</p></section><div class='metrics' id='metrics'></div><div class='grid'><section class='card' id='upload'><span class='eyebrow'>NEW RUN</span><h2>Add a bill</h2><div class='tabs'><button id='uploadtab'>Upload from computer</button><button id='sampletab'>Select from dataset</button></div><form id='uploadform' class='upload'><input type=file name=invoice_file accept='.pdf,.png,.jpg,.jpeg' required><button class='button'>Fetch bill details →</button></form><form id='sampleform' class='hide'><select id='sample'>{% for i,name in samples %}<option value='{{i}}'>{{name}}</option>{% endfor %}</select><button class='button'>Fetch dataset bill →</button></form><p class='muted'>PDF, PNG or JPEG · Up to 8 MB</p><p id='error' class='error'></p></section><section class='card'><span class='eyebrow'>LIVE ACTIVITY</span><h2>Run monitor</h2><div class='cols'><div><div id='timeline' class='timeline'><p class='muted'>Choose a bill to begin.</p></div></div><div><div id='previewempty' class='muted'>The source bill appears here.</div><iframe id='previewpdf' class='preview hide' title='Bill preview'></iframe><img id='previewimg' class='preview hide' alt='Bill preview'></div></div></section></div><section class='card hide' id='result'><span class='eyebrow'>DECISION EVIDENCE</span><h2 id='resulttitle'></h2><a id='auditlink' class='button secondary' href='#' download>Download audit record ↓</a><div id='reason'></div><div class='cols'><div><h3>Extracted fields</h3><div id='fields' class='tablewrap'></div><h3>PO matching</h3><div id='po'></div></div><div><h3>Financial validation</h3><div id='finance'></div><h3>Dataset evaluation</h3><div id='evaluation'></div></div></div><div class='review'><h3>Manual document review</h3><p class='muted'>Verification does not authorise payment. Corrections preserve the automated decision.</p><input id='reviewer' placeholder='Reviewer name'><select id='outcome'><option value='VERIFIED'>Verified against source</option><option value='NEEDS_CORRECTION'>Needs correction</option></select><textarea id='corrections' placeholder='Corrected fields as JSON, e.g. {"total": 1000}'></textarea><textarea id='note' placeholder='Review note'></textarea><button id='savereview' class='button'>Save review</button><p id='reviewmessage'></p><div id='reviews'></div></div></section><section class='card' id='history'><span class='eyebrow'>AUDIT TRAIL</span><h2>Processing history</h2><div class='cols'><select id='decisionfilter'><option value=''>All decisions</option><option>APPROVED</option><option>REJECTED</option><option>PENDING_REVIEW</option><option>FAILED</option></select><input id='vendorfilter' placeholder='Filter by vendor'></div><input id='datefilter' type=date><p id='recordcount' class='muted'></p><div class='tablewrap'><table><thead><tr><th>Time</th><th>Run ID</th><th>Type</th><th>Vendor</th><th>Seller GSTIN</th><th>Invoice</th><th>PO</th><th>Total</th><th>Method</th><th>Accuracy</th><th>Decision</th><th>Reason</th><th>Manual check</th></tr></thead><tbody id='historyrows'></tbody></table></div></section></main></div><script>
 const csrf={{ csrf|tojson }}; let active=null, source=null; const $=id=>document.getElementById(id); const esc=s=>String(s??'-').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function table(rows){return '<table>'+rows.map(r=>'<tr>'+r.map(x=>'<td>'+esc(x)+'</td>').join('')+'</tr>').join('')+'</table>'}
 function showTab(sample){$('uploadform').classList.toggle('hide',sample);$('sampleform').classList.toggle('hide',!sample)}$('uploadtab').onclick=()=>showTab(false);$('sampletab').onclick=()=>showTab(true);
 async function start(url,body){$('error').textContent='';let r=await fetch(url,{method:'POST',headers:{'X-CSRF-Token':csrf},body});let j=await r.json();if(!r.ok){$('error').textContent=j.error||'Request failed';return}active=j.run_id;showRun(active);}
 $('uploadform').onsubmit=e=>{e.preventDefault();start('/api/runs',new FormData(e.target))};$('sampleform').onsubmit=e=>{e.preventDefault();start('/api/samples/'+$('sample').value)};
-async function refresh(){let q=new URLSearchParams({decision:$('decisionfilter').value,vendor:$('vendorfilter').value,date:$('datefilter').value});let rows=await (await fetch('/api/runs?'+q)).json();let invoices=rows.filter(r=>(r.document_routing?.status||'INVOICE_AP_WORKFLOW')==='INVOICE_AP_WORKFLOW');let completed=invoices.filter(r=>['APPROVED','REJECTED','PENDING_REVIEW'].includes(r.status)).length;let approved=invoices.filter(r=>r.status==='APPROVED').length;let pending=invoices.filter(r=>r.status==='PENDING_REVIEW').length;let rejected=invoices.filter(r=>r.status==='REJECTED').length;let nonInvoices=rows.filter(r=>r.document_routing?.status==='NON_INVOICE').length;let value=invoices.reduce((sum,r)=>sum+(Number(r.total)||0),0);let exceptionRate=completed?(((pending+rejected)/completed)*100).toFixed(1)+'%':'—';let currency=new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0}).format(value);$('metrics').innerHTML=[['Invoices processed',invoices.length],['Invoice value',currency],['Auto-approval rate',completed?((approved/completed)*100).toFixed(1)+'%':'—'],['Exception rate',exceptionRate],['Pending reviews',pending],['Rejected',rejected],['Non-invoice documents',nonInvoices]].map(([k,v])=>`<div class='metric'><span class='metric-label'>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');$('historyrows').innerHTML=rows.map(r=>`<tr><td>${esc(r.time)}</td><td><button class='button' onclick='showRun(${JSON.stringify(r.run_id)})'>${esc(r.run_id.slice(0,8))}</button></td><td>${esc(r.document_type)}</td><td>${esc(r.vendor)}</td><td>${esc(r.gstin)}</td><td>${esc(r.invoice_number)}</td><td>${esc(r.po_number)}</td><td>${esc(r.total)}</td><td>${esc(r.method)}</td><td>${r.field_accuracy==null?'-':(r.field_accuracy*100).toFixed(1)+'%'}</td><td><span class='badge ${esc(r.status)}'>${esc(r.status)}</span></td><td>${esc(r.document_routing?.reason||(r.reasons||[])[0])}</td><td>${esc((r.reviews||[]).at(-1)?.outcome||'Unchecked')}</td></tr>`).join('')||'<tr><td colspan=13>No runs yet</td></tr>';if($('reviewrows'))$('reviewrows').innerHTML=invoices.filter(r=>r.status==='PENDING_REVIEW').slice(0,8).map(r=>`<div class='stage'><b>${esc(r.invoice_number||'Invoice')}</b><span>${esc(r.vendor||'Unknown vendor')} · ${esc(r.total||'Amount unavailable')} <button class='button' onclick='showRun(${JSON.stringify(r.run_id)})'>Open</button></span></div>`).join('')||'<p class=muted>No invoices currently require review.</p>'}
+async function refresh(){let q=new URLSearchParams({decision:$('decisionfilter').value,vendor:$('vendorfilter').value,date:$('datefilter').value});let [response,summary]=await Promise.all([fetch('/api/runs?'+q),fetch('/api/analytics/summary').then(x=>x.json()).catch(()=>({}))]);let rows=await response.json();let invoices=rows.filter(r=>(r.document_routing?.status||'INVOICE_AP_WORKFLOW')==='INVOICE_AP_WORKFLOW');let m=summary.invoice_metrics||{};let completed=m.decided||0;let currency=new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0}).format(m.value||0);$('metrics').innerHTML=[['Invoices processed',m.invoices||0],['Invoice value',currency],['Auto-approval rate',completed?((m.approved/completed)*100).toFixed(1)+'%':'—'],['Exception rate',completed?(((m.pending+m.rejected)/completed)*100).toFixed(1)+'%':'—'],['Pending reviews',m.pending||0],['Rejected',m.rejected||0],['Non-invoice documents',m.non_invoices||0]].map(([k,v])=>`<div class='metric'><span class='metric-label'>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');let total=Number(response.headers.get('X-Total-Count')||rows.length);if($('recordcount'))$('recordcount').textContent=`Showing ${rows.length} of ${total} record(s)`;$('historyrows').innerHTML=rows.map(r=>`<tr><td>${esc(r.time)}</td><td><button class='button' onclick='showRun(${JSON.stringify(r.run_id)})'>${esc(r.run_id.slice(0,8))}</button></td><td>${esc(r.document_type)}</td><td>${esc(r.vendor)}</td><td>${esc(r.gstin)}</td><td>${esc(r.invoice_number)}</td><td>${esc(r.po_number)}</td><td>${esc(r.total)}</td><td>${esc(r.method)}</td><td>${r.field_accuracy==null?'-':(r.field_accuracy*100).toFixed(1)+'%'}</td><td><span class='badge ${esc(r.status)}'>${esc(r.status)}</span></td><td>${esc(r.document_routing?.reason||(r.reasons||[])[0])}</td><td>${esc((r.reviews||[]).at(-1)?.outcome||'Unchecked')}</td></tr>`).join('')||'<tr><td colspan=13>No runs yet</td></tr>';if($('reviewrows'))$('reviewrows').innerHTML=invoices.filter(r=>r.status==='PENDING_REVIEW').slice(0,8).map(r=>`<div class='stage'><b>${esc(r.invoice_number||'Invoice')}</b><span>${esc(r.vendor||'Unknown vendor')} · ${esc(r.total||'Amount unavailable')} <button class='button' onclick='showRun(${JSON.stringify(r.run_id)})'>Open</button></span></div>`).join('')||'<p class=muted>No invoices currently require review.</p>'}
 ['decisionfilter','vendorfilter','datefilter'].forEach(id=>$(id).onchange=refresh);
-async function showRun(id){active=id;if(source)source.close();let r=await (await fetch('/api/runs/'+id)).json();let doc='/api/runs/'+id+'/document';$('previewempty').classList.add('hide');$('previewimg').classList.add('hide');$('previewpdf').classList.add('hide');if(r.document_id){let target=(r.source||'').toLowerCase().endsWith('.pdf')?$('previewpdf'):$('previewimg');target.src=doc;target.classList.remove('hide')}else $('previewempty').classList.remove('hide');renderRun(r);if(r.status==='RUNNING'){source=new EventSource('/api/runs/'+id+'/events');source.onmessage=async()=>renderRun(await (await fetch('/api/runs/'+id)).json());source.addEventListener('finished',async()=>{source.close();renderRun(await (await fetch('/api/runs/'+id)).json());refresh()})}}
-function renderRun(r){let latest={};(r.stages||[]).forEach(s=>latest[s.stage]=s);$('timeline').innerHTML=Object.entries(latest).map(([name,s])=>`<div class='stage'><div><b>${esc(name)}</b><br><small>${esc(s.detail)}</small></div><span>${esc(s.status)}</span></div>`).join('')||'<p class=muted>Waiting for processing events…</p>';if(r.status==='RUNNING')return;$('result').classList.remove('hide');$('resulttitle').innerHTML=`<span class='badge ${esc(r.status)}'>${esc(r.status)}</span> · ${esc(r.document_type)}`;$('reason').textContent=(r.reasons||[r.error||'']).join(' · ');let inv=r.invoice||{};$('fields').innerHTML=table(Object.entries(inv).filter(([k,v])=>!['raw_text','details','line_items','field_metadata'].includes(k)).map(([k,v])=>[k,typeof v==='object'?JSON.stringify(v):v]));$('po').textContent=JSON.stringify(r.decision?.po_matching||{},null,2);$('finance').innerHTML=table((r.decision?.financial_validation?.checks||[]).map(c=>[c.check,c.outcome,c.detail]));$('evaluation').innerHTML=r.comparisons?table(r.comparisons):'<p class=muted>No reference labels for this upload.</p>';$('reviews').innerHTML=(r.reviews||[]).map(x=>`<p>${esc(x.outcome)} · ${esc(x.reviewer)} · ${esc(x.note)}</p>`).join('');}
+async function showRun(id){active=id;if(source)source.close();let r=await (await fetch('/api/runs/'+id)).json();let doc='/api/runs/'+id+'/document';$('previewempty').classList.add('hide');$('previewimg').classList.add('hide');$('previewpdf').classList.add('hide');if(r.document_id){let target=(r.source||'').toLowerCase().endsWith('.pdf')?$('previewpdf'):$('previewimg');target.src=doc;target.classList.remove('hide')}else $('previewempty').classList.remove('hide');renderRun(r);if(r.status==='RUNNING'){source=new EventSource('/api/runs/'+id+'/events');let queued=null;source.onmessage=()=>{if(queued)return;queued=setTimeout(async()=>{queued=null;if(active===id)renderRun(await (await fetch('/api/runs/'+id)).json())},250)};source.addEventListener('finished',async()=>{source.close();renderRun(await (await fetch('/api/runs/'+id)).json());refresh()})}}
+function renderRun(r){let latest={};(r.stages||[]).forEach(s=>latest[s.stage]=s);$('timeline').innerHTML=Object.entries(latest).map(([name,s])=>`<div class='stage'><div><b>${esc(name)}</b><br><small>${esc(s.detail)}</small></div><span>${esc(s.status)}</span></div>`).join('')||'<p class=muted>Waiting for processing events…</p>';if(r.status==='RUNNING')return;$('result').classList.remove('hide');$('resulttitle').innerHTML=`<span class='badge ${esc(r.status)}'>${esc(r.status)}</span> · ${esc(r.document_type)}`;$('reason').textContent=(r.reasons||[r.error||'']).join(' · ');let inv=r.invoice||{};$('fields').innerHTML=table(Object.entries(inv).filter(([k,v])=>!['raw_text','details','line_items','field_metadata'].includes(k)).map(([k,v])=>[k,typeof v==='object'?JSON.stringify(v):v]));$('po').textContent=JSON.stringify(r.decision?.po_matching||{},null,2);$('finance').innerHTML=table((r.decision?.financial_validation?.checks||[]).map(c=>[c.check,c.outcome,c.detail]));$('evaluation').innerHTML=r.comparisons?table(r.comparisons):'<p class=muted>No reference labels for this upload.</p>';if($('auditlink'))$('auditlink').href='/api/runs/'+r.run_id+'/audit.json';$('reviews').innerHTML=(r.reviews||[]).map(x=>`<p>${esc(x.outcome)} · ${esc(x.reviewer)} · ${esc(x.note)}</p>`).join('');}
 $('savereview').onclick=async()=>{let corrections={};try{corrections=$('corrections').value.trim()?JSON.parse($('corrections').value):{}}catch(e){$('reviewmessage').textContent='Corrections must be valid JSON';return}let r=await fetch('/api/runs/'+active+'/reviews',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({reviewer:$('reviewer').value,outcome:$('outcome').value,note:$('note').value,corrections})});let j=await r.json();$('reviewmessage').textContent=j.error||'Review saved. Automated decision retained.';if(r.ok){showRun(active);refresh()}};
 const clearButton=document.createElement('button');clearButton.className='button';clearButton.textContent='Clear history';clearButton.title='Archive visible runs; retain audit and duplicate records';$('history').insertBefore(clearButton,$('history').querySelector('.cols'));
 clearButton.onclick=async()=>{if(!confirm('Clear visible history? Audit records, PO balances and duplicate protection will remain.'))return;let r=await fetch('/api/history/clear',{method:'POST',headers:{'X-CSRF-Token':csrf}});let j=await r.json();if(r.ok){$('history').querySelector('h2').textContent='Processing history · '+j.archived+' archived';refresh()}};

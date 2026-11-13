@@ -80,18 +80,20 @@ Optional, idempotent legacy JSON import: set `DATABASE_URL`, then run `python mi
 
 ## Workspace
 
+A sidebar workspace, light by default with a dark theme on the toggle.
+
 | Page | What it is for |
 | --- | --- |
-| Overview | How many invoices were handled and how many needed no one; money stopped, time saved, volume over time, why invoices were stopped, queue by team, time per step, top vendors, payables due. |
-| Upload | Drag and drop one file (opens the live view) or a batch of up to 25 (tracked together). A sample inbox runs six fictional documents, each showing a different outcome. |
-| Needs review | Open exceptions grouped by team, closest deadline first. |
-| Invoice | Source document beside its checks (in plain words), extracted values with their evidence, processing steps (live while running), activity and the audit record. Reviewers approve, reject or correct here. |
-| Invoices | Search, filter by result or date, export CSV/Excel, archive finished. |
-| Vendors | Every vendor with activity, open PO balance and anything needing attention. |
-| Orders & data | PO list with utilisation, payment record and vendor list; CSV upload with validation. |
-| How it works | The steps, the three outcomes, team routing, measured reading accuracy, and the optional AI connection. |
+| Today | A briefing for the person reviewing: what is waiting and how much went straight through; the pipeline from received to outcome, a 14-day volume chart, the automation ring, latest activity, next deadlines, a small ledger, what stops invoices, where processing time goes, and payables by due date. |
+| Exceptions | A two-pane inbox of invoices that need a person, filtered by team and ordered by deadline. ↑/↓ moves, Enter opens. |
+| Bring in invoices | Drop one file (opens its live view) or up to 25 (tracked together). A numbered scenario library runs six fictional documents, each triggering a different rule. |
+| Invoice | The source document beside tabs for Summary, Checks, Extracted, Timeline and Activity. A decision dock at the bottom approves, rejects, corrects details or saves a note. |
+| All invoices | Grouped by day, filter by result, date or text, export Excel/CSV, archive finished. |
+| Suppliers | Standing, activity and purchase-order headroom for every supplier, with flags inline. |
+| Orders & ledger | Purchase orders with consumption, the approval ledger, the supplier list, and validated CSV replacement. |
+| Under the hood | The ten steps every invoice goes through, outcomes, team routing, measured reading accuracy and the optional AI connection. |
 
-Press ⌘K (or `/`) anywhere to search invoices or jump to a page. Your reviewer name is stored in the browser and recorded on each decision.
+Press ⌘K (or `/`) anywhere to find an invoice or jump to a page. The reviewer name is stored in the browser and recorded on each decision.
 
 ### Review workflow
 

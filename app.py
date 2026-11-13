@@ -779,9 +779,9 @@ def index():
                            auth_enabled=bool(os.getenv("DEMO_USERNAME")))
 
 LOGIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in · zamp AP</title><link rel="stylesheet" href="/static/app.css"></head>
-<body class="login-page"><main class="login-card"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>zamp<span class="brand-sub">AP</span></a>
-<h1>Sign in</h1><p class="muted">Invoices, decisions and the review queue for your accounts payable team.</p>
+<title>Sign in · zamp Payables desk</title><link rel="stylesheet" href="/static/app.css"></head>
+<body class="login-page"><main class="login-card"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span>zamp</span><span class="brand-sub">Payables desk</span></a>
+<h1>Welcome back</h1><p class="muted">Sign in to pick up today's invoices and exceptions.</p>
 <form method="post" class="stack"><label>Username<input name="username" autocomplete="username" required autofocus></label>
 <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
 <button class="btn btn-primary">Sign in</button></form>{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}</main></body></html>"""

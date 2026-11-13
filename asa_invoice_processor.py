@@ -324,7 +324,22 @@ def extract_invoice(text: str) -> dict:
         invoice_number = None
     po_number = extract_reference(lines, r"^(?:cust(?:omer)?\.?\s*p\.?o\.?|p\.?\s*o\.?|purchase\s*order)(?:\s*(?:number|no\.?|#))?\b")
     delivery_number = extract_reference(lines, r"^(?:delivery|challan)\s*(?:number|no\.?|#)\b")
-    customer_order_number = extract_reference(lines, r"^customer\s*order\s*(?:number|no\.?|#)\b")
+    customer_order_number = extract_reference(lines, r"^cust(?:omer)?\.?\s*order\s*(?:number|no\.?|#)\b")
+    if invoice_number is None:
+        # Tally-style invoices often print ``Invoice No.`` and ``Dated`` as a
+        # split header, followed by the number and then the date. Limit this
+        # fallback to that observed structure so arbitrary table numbers do
+        # not become invoice identifiers.
+        invoice_index = next((i for i, line in enumerate(lines)
+                              if re.fullmatch(r"invoice\s*(?:no\.?|number|#)", line, re.I)), None)
+        if invoice_index is not None and any(re.fullmatch(r"dated", line, re.I) for line in lines[invoice_index + 1:invoice_index + 3]):
+            for candidate in lines[invoice_index + 1:invoice_index + 8]:
+                if dated(candidate):
+                    break
+                candidate = candidate.strip(" .:#")
+                if re.fullmatch(r"[A-Z0-9][A-Z0-9/_-]{0,29}", candidate, re.I) and re.search(r"\d", candidate):
+                    invoice_number = candidate
+                    break
     # OCR occasionally inserts a space within a printed label (for example "Ve ndor").
     # Accept that narrow variation only when it is a line-leading field label.
     vendor_label = r"trade\s*/?\s*legal\s*name|ve\s*ndor|supplier|from"
@@ -354,6 +369,11 @@ def extract_invoice(text: str) -> dict:
     if not gstin and len(set(gstins)) == 1 and not buyer_gstins: gstin = gstins[0].upper()
     identity_ambiguous = len(set(seller_gstins)) > 1 or (len(set(gstins)) > 1 and not seller_gstins)
     invoice_date = invoice_date_from_header or dated(label_value(r"invoice\s*date|inv\.?\s*date|date\s*of\s*issue|date"))
+    if invoice_date is None:
+        split_header = next((i for i, line in enumerate(lines)
+                             if re.fullmatch(r"invoice\s*(?:no\.?|number|#)", line, re.I)), None)
+        if split_header is not None and any(re.fullmatch(r"dated", line, re.I) for line in lines[split_header + 1:split_header + 3]):
+            invoice_date = next((dated(line) for line in lines[split_header + 1:split_header + 9] if dated(line)), None)
     due_date = dated(label_value(r"due\s*date|payment\s*due"))
     po_date = dated(label_value(r"(?:p\.?o\.?|purchase\s*order)\s*date"))
     order_number = label_value(r"order\s*(?:number|no\.?)")
@@ -365,6 +385,10 @@ def extract_invoice(text: str) -> dict:
     pan = label_value(r"pan(?:\s*no\.?)?")
 
     document_type = classify_document(text)
+    if document_type == "DELIVERY_CHALLAN" and customer_order_number:
+        # A challan does not have an invoice number. Its customer order is the
+        # source-proven unique document reference used for traceability.
+        invoice_number = customer_order_number
     po_total_raw = label_value(r"total\s*purchase\s*order\s*value|purchase\s*order\s*total|item\s*total\s*value") if document_type == "PURCHASE_ORDER" else None
     if document_type == "PURCHASE_ORDER" and (not po_total_raw or money(po_total_raw) is None):
         po_total_raw = pick([rf"(?:total\s*purchase\s*order\s*value|purchase\s*order\s*total|item\s*total\s*value)\s*[:#-]?\s*{MONEY}"])
@@ -444,7 +468,7 @@ def extract_invoice(text: str) -> dict:
         if isinstance(value, float): needle = f"{value:.2f}"
         for i, line in enumerate(lines):
             if not re.search(labels[key], line, re.I): continue
-            region = " ".join(lines[i:i+3])
+            region = " ".join(lines[i:i + (7 if key == "invoice_number" else 3)])
             if needle.casefold() in region.casefold() or (isinstance(value, float) and str(int(value)) in region):
                 return {"value":value, "evidence":region[:240], "method":"label_and_context",
                         "reliability":"DIRECT_LABEL", "validation_status":"NOT_CHECKED", "manual_correction":False}

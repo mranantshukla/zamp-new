@@ -1,10 +1,10 @@
 {
   "samples": 22,
-  "seconds": 48.65,
+  "seconds": 40.93,
   "field_outcomes": {
     "Label unavailable": 160,
-    "Mismatch": 33,
-    "Extraction missing": 27,
+    "Mismatch": 34,
+    "Extraction missing": 26,
     "Exact match": 30,
     "Ambiguous label": 14,
     "Label not mapped to a reliable extraction field": 25
@@ -279,7 +279,7 @@
       "document_type": "DELIVERY_CHALLAN",
       "field_accuracy": 0.25,
       "fields": {
-        "invoice_number": null,
+        "invoice_number": "13542319324",
         "vendor": "DELIVERYCHALLAN",
         "po_number": null,
         "date": "10-04-2024",
@@ -305,7 +305,7 @@
       },
       "decision": "PENDING_REVIEW",
       "reasons": [
-        "Missing: invoice_number, po_number, total",
+        "Missing: po_number, total",
         "Critical OCR fields lack required source evidence: invoice_number, vendor, po_number, date, total, subtotal, tax",
         "No PO reference identified on document",
         "Vendor identity missing or absent from master",
@@ -531,10 +531,10 @@
       "document_type": "TAX_INVOICE",
       "field_accuracy": 0.25,
       "fields": {
-        "invoice_number": null,
+        "invoice_number": "12",
         "vendor": "'s Ref",
         "po_number": null,
-        "date": null,
+        "date": "6-May-2021",
         "total": 1043481.0,
         "subtotal": null,
         "tax": 85414012.0
@@ -556,8 +556,8 @@
       },
       "decision": "PENDING_REVIEW",
       "reasons": [
-        "Missing: invoice_number, po_number, date",
-        "Critical OCR fields lack required source evidence: invoice_number, po_number, date, total, subtotal",
+        "Missing: po_number",
+        "Critical OCR fields lack required source evidence: po_number, date, total, subtotal",
         "No PO reference identified on document",
         "Vendor identity missing or absent from master",
         "Ambiguous seller GSTIN in document",
@@ -643,7 +643,7 @@
       "decision": "PENDING_REVIEW",
       "reasons": [
         "Missing: po_number",
-        "Critical OCR fields lack required source evidence: invoice_number, vendor, po_number, date, total, subtotal",
+        "Critical OCR fields lack required source evidence: vendor, po_number, date, total, subtotal",
         "No PO reference identified on document",
         "Vendor identity missing or absent from master",
         "PO balance validation blocked: No PO reference identified on document"
@@ -682,7 +682,7 @@
       "decision": "PENDING_REVIEW",
       "reasons": [
         "Missing: po_number",
-        "Critical OCR fields lack required source evidence: invoice_number, vendor, po_number, date, total, subtotal",
+        "Critical OCR fields lack required source evidence: vendor, po_number, date, total, subtotal",
         "No PO reference identified on document",
         "Vendor identity missing or absent from master",
         "PO balance validation blocked: No PO reference identified on document"
@@ -721,7 +721,7 @@
       "decision": "PENDING_REVIEW",
       "reasons": [
         "Missing: po_number",
-        "Critical OCR fields lack required source evidence: invoice_number, vendor, po_number, date, total, subtotal",
+        "Critical OCR fields lack required source evidence: vendor, po_number, date, total, subtotal",
         "No PO reference identified on document",
         "Vendor identity missing or absent from master",
         "PO balance validation blocked: No PO reference identified on document"
@@ -760,7 +760,7 @@
       "decision": "PENDING_REVIEW",
       "reasons": [
         "Missing: po_number",
-        "Critical OCR fields lack required source evidence: invoice_number, vendor, po_number, date, total, subtotal",
+        "Critical OCR fields lack required source evidence: vendor, po_number, date, total, subtotal",
         "No PO reference identified on document",
         "Vendor identity missing or absent from master",
         "PO balance validation blocked: No PO reference identified on document"
@@ -818,7 +818,7 @@
         "invoice_number": "Billers Name:High Furnace Manufacturer",
         "vendor": "'s Ref",
         "po_number": null,
-        "date": null,
+        "date": "6-May-2021",
         "total": 1043481.0,
         "subtotal": null,
         "tax": 12166.02
@@ -826,7 +826,7 @@
       "outcomes": {
         "invoice_number": "Mismatch",
         "po_number": "Label unavailable",
-        "date": "Extraction missing",
+        "date": "Mismatch",
         "total": "Mismatch",
         "subtotal": "Label unavailable",
         "pan": "Label unavailable",
@@ -841,7 +841,7 @@
       },
       "decision": "PENDING_REVIEW",
       "reasons": [
-        "Missing: po_number, date",
+        "Missing: po_number",
         "Critical OCR fields lack required source evidence: po_number, date, total, subtotal, tax",
         "No PO reference identified on document",
         "Vendor identity missing or absent from master",
@@ -862,7 +862,7 @@
         "invoice_number": "Billers Name:High Furnace Manufacturer",
         "vendor": "'s Ref",
         "po_number": null,
-        "date": null,
+        "date": "6-May-2021",
         "total": null,
         "subtotal": null,
         "tax": 23.0
@@ -884,7 +884,7 @@
       },
       "decision": "PENDING_REVIEW",
       "reasons": [
-        "Missing: po_number, date, total",
+        "Missing: po_number, total",
         "Critical OCR fields lack required source evidence: po_number, date, total, subtotal, tax",
         "No PO reference identified on document",
         "Vendor identity missing or absent from master",

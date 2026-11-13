@@ -12,14 +12,14 @@ calculate the report; they never enter production extraction or AP decisions.
 
 ## Latest local run
 
-Run date: 2026-11-13 (22 images, 48.65 seconds)
+Run date: 2026-11-13 (22 images, 40.93 seconds)
 
 | Measure | Result |
 | --- | ---: |
 | Comparable labelled fields | 90 |
 | Exact matches | 30 |
 | Mismatches | 33 |
-| Missing extractions | 27 |
+| Missing extractions | 26 |
 | Field exact-match accuracy | 33.3% |
 | AP decisions | 22 `PENDING_REVIEW` |
 

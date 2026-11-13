@@ -170,6 +170,29 @@ def test_bad_invoice_heading_is_not_an_invoice_number():
     assert extracted["invoice_number"] is None
 
 
+def test_delivery_challan_uses_customer_order_as_document_reference():
+    extracted = processor.extract_invoice("""DELIVERY CHALLAN
+Cust Order No
+:13542319324
+Date: 10-04-2024
+""")
+    assert extracted["document_type"] == "DELIVERY_CHALLAN"
+    assert extracted["details"]["customer_order_number"] == "13542319324"
+    assert extracted["invoice_number"] == "13542319324"
+
+
+def test_split_invoice_number_and_dated_header():
+    extracted = processor.extract_invoice("""TAX INVOICE
+Invoice No.
+Dated
+Billers Name: Example Supplier
+12
+6-May-2021
+""")
+    assert extracted["invoice_number"] == "12"
+    assert extracted["date"] == "6-May-2021"
+
+
 def test_selective_ocr_preprocessing_only_targets_low_contrast_images():
     white = Image.new("RGB", (180, 80), "white")
     high = BytesIO(); white.save(high, format="PNG")

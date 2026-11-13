@@ -124,3 +124,6 @@ US-style invoices ("INVOICE" without "TAX", `$` amounts, dates such as `Nov 3, 2
 First-time OCR can still be slow on CPU-limited hosting. On one local sample (`invoice_07.jpg`), recognition batch size 1 took 3.3–3.4 seconds and batch size 6 took 5.8–5.9 seconds, so batch size 1 remains the default. These local timings do not predict Render latency. Exact-document cache hits avoid OCR on subsequent runs; cold documents still require OCR.
 
 The live monitor checks for stage updates once per second for up to 15 minutes. A slow OCR run can therefore finish while the monitor is still connected, with less database polling than before.
+
+
+Reference-informed controls: separately labelled freight charges are included in arithmetic alongside discounts, GST and rounding. Copy markings are excluded from supplier-name fallback. Future dates are advisory. Announced bank-account changes route to Treasury & Fraud for independent verification. Missing identity, references, financial evidence or PO authority still block approval because they prevent payee, duplicate or overpayment checks.

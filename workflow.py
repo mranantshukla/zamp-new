@@ -10,6 +10,7 @@ import os
 
 # Plain-language names for decision checks, shown in the UI and audit views.
 CHECK_LABELS = {
+    "payment_change": "Changed payment details verified independently",
     "required_fields": "All key details are present",
     "ocr_field_evidence": "Each detail sits next to its printed label",
     "po_match": "Purchase order found",
@@ -45,7 +46,7 @@ TEAMS = {
 
 # Highest-risk first: a payment-integrity concern outranks a paperwork gap.
 ROUTES = (
-    ("Treasury & Fraud", {"possible_duplicate", "vendor_gstin_match", "vendor_identity",
+    ("Treasury & Fraud", {"payment_change", "possible_duplicate", "vendor_gstin_match", "vendor_identity",
                           "seller_buyer_distinct", "seller_gstin", "buyer_gstin"}),
     ("Vendor Management", {"vendor_master", "vendor_authorisation"}),
     ("Procurement", {"po_match", "po_authorisation", "po_remaining", "po_balance_available", "vendor_match"}),
@@ -62,7 +63,7 @@ def sla_hours(team: str) -> int:
 
 
 def failing_checks(checks) -> list[str]:
-    return [c["check"] for c in checks or [] if c.get("outcome") not in ("VERIFIED_PASS", None)]
+    return [c["check"] for c in checks or [] if c.get("outcome") not in ("VERIFIED_PASS", "ADVISORY", None)]
 
 
 def route(status: str, checks) -> dict | None:

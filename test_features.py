@@ -88,12 +88,12 @@ def test_exact_duplicate_still_rejected_not_double_flagged(client):
     assert not any(c["check"] == "possible_duplicate" for c in again["decision"]["checks"])
 
 
-def test_future_dated_invoice_needs_review(tmp_path):
+def test_future_dated_invoice_is_reported_without_hold(tmp_path):
     po = tmp_path / "pos.csv"; po.write_text("po_number,vendor,po_amount,invoiced_to_date\nPO-1,Acme Supplies,1000,0\n")
     inv = {"invoice_number": "F-1", "po_number": "PO-1", "vendor": "Acme Supplies", "date": "2026-12-01",
            "total": 1000, "subtotal": 1000, "tax": 0, "details": {}, "document_type": "TAX_INVOICE"}
     future = processor.decide(inv, po, history_rows=[], today=date(2026, 11, 13))
-    assert future.status == "PENDING_REVIEW"
+    assert future.status == "APPROVED"
     assert any(c["check"] == "invoice_date_future" for c in future.checks)
     # One day of grace absorbs time-zone differences.
     assert processor.decide({**inv, "date": "14/11/2026"}, po, history_rows=[], today=date(2026, 11, 13)).status == "APPROVED"

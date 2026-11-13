@@ -570,7 +570,8 @@
         verdict = `<div class="verdict ${okd ? 'ok' : 'bad'}"><h3>${okd ? 'Approved' : 'Rejected'} by ${esc(d.reviewer || 'a reviewer')}</h3>${d.note ? `<p>“${esc(d.note)}”</p>` : ''}<p class="muted small">${esc(stamp(d.at))}. The automatic check had flagged: ${esc(human(reasons.slice(0, 2).join('; ')))}.</p>
           ${okd ? '' : '<div class="row" style="margin-top:6px"><button class="btn btn-sm" data-email>Write to supplier</button></div>'}</div>`;
       } else if (r.status === 'APPROVED') {
-        verdict = '<div class="verdict ok"><h3>Cleared automatically</h3><p>Supplier, purchase order, arithmetic and duplicate checks all passed. Ready for payment with no one needing to look.</p></div>';
+        const advisory = checks.filter((c) => c.outcome === 'ADVISORY');
+        verdict = `<div class="verdict ok"><h3>Cleared automatically</h3><p>Supplier, purchase order, arithmetic and duplicate checks all passed.</p>${advisory.length ? `<p>Reported for your records; no action required:</p><ul>${advisory.map((c) => `<li>${esc(c.detail)}</li>`).join('')}</ul>` : ''}</div>`;
       } else if (r.status === 'REJECTED') {
         verdict = `<div class="verdict bad"><h3>Held back — not payable as sent</h3><ul class="reasons" style="margin-top:4px">${reasons.map((x) => `<li>${esc(human(x))}</li>`).join('')}</ul><div class="row" style="margin-top:8px"><button class="btn btn-sm" data-email>Write to supplier</button></div></div>`;
       } else {

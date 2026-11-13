@@ -382,3 +382,35 @@ def test_old_evaluation_backfills_decision_without_labels(tmp_path, monkeypatch)
     assert updated["run_id"] == original["run_id"] and updated["field_accuracy"] == 0.5
     assert updated["invoice_number"] == "OCR-1"
     assert updated["reasons"]
+
+
+def test_freight_discount_and_rounding_reconcile(tmp_path):
+    po, history = fixture(tmp_path, amount=2000)
+    inv = invoice(total=1080)
+    inv.update(subtotal=1000, discount=100, tax=162)
+    inv["details"] = {"shipping_amount": 18, "rounded_off": 0}
+    result = processor.decide(inv, po, history)
+    assert next(c for c in result.checks if c["check"] == "invoice_math")["passed"]
+    inv["total"] = 1100
+    result = processor.decide(inv, po, history)
+    assert not next(c for c in result.checks if c["check"] == "invoice_math")["passed"]
+
+
+def test_duplicate_marking_is_not_supplier():
+    inv = processor.extract_invoice("Duplicalt\nAcme Supplies\nTAX INVOICE\nInvoice No: A-1\nFreight Charges: 18\nSubtotal: 1000\nTotal Tax: 180\nGrand Total: 1198")
+    assert inv["vendor"] == "Acme Supplies"
+    assert inv["details"]["shipping_amount"] == 18
+
+
+def test_payment_change_requires_review_but_future_date_is_advisory(tmp_path):
+    po, history = fixture(tmp_path)
+    inv = invoice()
+    inv["date"] = "2099-11-10"
+    result = processor.decide(inv, po, history)
+    assert result.status == "APPROVED"
+    assert next(c for c in result.checks if c["check"] == "invoice_date_future")["outcome"] == "ADVISORY"
+    inv["raw_text"] = "TAX INVOICE\nPlease use our new bank account for payment"
+    result = processor.decide(inv, po, history)
+    assert result.status == "PENDING_REVIEW"
+    import workflow
+    assert workflow.route(result.status, result.checks)["team"] == "Treasury & Fraud"

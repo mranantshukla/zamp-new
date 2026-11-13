@@ -356,7 +356,7 @@ def extract_invoice(text: str) -> dict:
         vendor = next((line for line in lines[lines.index(vendor) + 1:] if not re.search(r"gst|pan|tax|reg\.?\s*no", line, re.I)), vendor) if vendor in lines else vendor
     if not vendor:
         tax_invoice_index = next((i for i, line in enumerate(lines) if re.search(r"tax\s*invoice", line, re.I)), len(lines))
-        vendor = next((line for line in lines[:tax_invoice_index] if not re.search(r"plot|contact|email|gst|tax|address|original|copy", line, re.I) and len(line) > 2), None)
+        vendor = next((line for line in lines[:tax_invoice_index] if not re.search(r"plot|contact|email|gst|tax|address|original|copy|duplicat[elt]*|^duplicalt$", line, re.I) and len(line) > 2), None)
     buyer = label_value(r"bill\s*to|to")
     if not buyer or not buyer.strip(" ,.-") or re.search(r"gst|invoice|address|reg\.?\s*no|^to[,.-]*$", buyer, re.I):
         to_index = next((i for i, line in enumerate(lines) if re.match(r"^\s*to\s*[, :.-]*$", line, re.I)), None)
@@ -410,6 +410,7 @@ def extract_invoice(text: str) -> dict:
     if total_value is None and document_type != "PURCHASE_ORDER":
         total_value = money(pick([r"grand\s*total.*?(\d[\d,]*(?:\.\d{1,2})?)", r"\bonly\s+(\d[\d,]*(?:\.\d{1,2})?)"], clean))
     subtotal_raw = label_value(r"sub\s*-?\s*total|subtotal|taxable\s*value|net\s*before\s*tax")
+    shipping_raw = label_value(r"shipping\s*(?:charges?|amount)?|freight\s*(?:charges?|amount)?|delivery\s*charges?")
     discount_raw = label_value(r"discount|rebate|less\s*:?")
     rounded_off_raw = label_value(r"rounded\s*off|round\s*off")
     tax_raw = label_value(r"total\s*tax|total\s*gst|tax\s*amount")
@@ -463,7 +464,7 @@ def extract_invoice(text: str) -> dict:
         "place_of_supply": place_of_supply, "tax_type": tax_type, "salesperson": salesperson,
         "pan": pan, "phone": phone, "email": email, "reverse_charge": reverse_charge,
         "bank_name": bank_name, "account_last4": account[-4:] if account else None, "ifsc": ifsc,
-        "rounded_off": money(rounded_off_raw), "taxable_amount": money(subtotal_raw), "tax_breakdown": tax_breakdown,
+        "shipping_amount": money(shipping_raw), "rounded_off": money(rounded_off_raw), "taxable_amount": money(subtotal_raw), "tax_breakdown": tax_breakdown,
         "po_total": money(po_total_raw),
     }
     def field_evidence(key, value):
@@ -613,7 +614,7 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
               "review" if "ocr" in method and not within else "confirmed")
         if not within: po_status = "BLOCKED"
     if inv.get("subtotal") is not None and inv.get("total") is not None and inv.get("tax") is not None:
-        expected = inv["subtotal"] - (inv.get("discount") or 0) + inv["tax"] + (inv.get("details", {}).get("rounded_off") or 0)
+        expected = inv["subtotal"] - (inv.get("discount") or 0) + inv["tax"] + (inv.get("details", {}).get("shipping_amount") or 0) + (inv.get("details", {}).get("rounded_off") or 0)
         math_ok = abs(expected - inv["total"]) <= 0.01
         check("invoice_math", math_ok, f"Computed={expected:.2f}; stated={inv['total']:.2f}", "review" if "ocr" in method else "confirmed")
     components = inv.get("details", {}).get("tax_breakdown") or {}
@@ -646,6 +647,12 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
     document_type = inv.get("document_type") or (classify_document(inv.get("raw_text", "")) if inv.get("raw_text") else "TAX_INVOICE")
     if document_type != "TAX_INVOICE":
         check("document_type", False, f"{document_type} is not eligible for automatic invoice approval", "review")
+    if re.search(r"\b(?:new\s+bank\s+(?:account|details)|bank\s+(?:account|details)\s+(?:has|have)\s+changed|change\s+of\s+bank\s+(?:account|details))\b", inv.get("raw_text", ""), re.I):
+        check("payment_change", False, "Payment instructions announce changed bank details; verify using the supplier contact already on file", "review")
+    for item in checks:
+        if item["check"] == "invoice_date_future" and not item["passed"]:
+            item["outcome"] = "ADVISORY"
+            item["category"] = "advisory"
     status = resolve(checks)
     if status == "REJECTED":
         status, action, confidence = "REJECTED", "Route to AP exception queue", "HIGH"

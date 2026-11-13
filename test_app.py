@@ -159,10 +159,10 @@ def test_login_session_has_persistent_cookie(client, monkeypatch):
 
 
 @pytest.mark.parametrize("change,expected", [
-    ({"number":""}, "PENDING_REVIEW"), ({"total":""}, "PENDING_REVIEW"),
+    ({"number":""}, "APPROVED"), ({"total":""}, "PENDING_REVIEW"),
     ({"date":"31/02/2026"}, "APPROVED"), ({"vendor":"Wrong Vendor"}, "PENDING_REVIEW"),
     ({"po":""}, "PENDING_REVIEW"), ({"po":"UNKNOWN-44"}, "PENDING_REVIEW"),
-    ({"total":"1001.00"}, "REJECTED"), ({"subtotal":"800.00"}, "REJECTED"),
+    ({"total":"1001.00"}, "PENDING_REVIEW"), ({"subtotal":"800.00"}, "PENDING_REVIEW"),
     ({"heading":"DELIVERY CHALLAN"}, "PENDING_REVIEW"),
 ])
 def test_decisions(client, change, expected):
@@ -217,7 +217,7 @@ def test_financial_components_and_partial_po(client):
     second = invoice_text(number="PART-2",subtotal="600.00",tax="0.00",total="600.00")
     assert submit(client,pdf(second))["status"] == "APPROVED"
     excess = invoice_text(number="PART-3",subtotal="1.00",tax="0.00",total="1.00")
-    assert submit(client,pdf(excess))["status"] == "REJECTED"
+    assert submit(client,pdf(excess))["status"] == "PENDING_REVIEW"
 
 
 def test_manual_review_preserves_automated_decision(client):
@@ -369,3 +369,43 @@ def test_issue_acknowledgement_is_audited_without_approving(client):
     assert client.post(url, json={"reviewer": "Tester", "acknowledged": False}, headers=headers).status_code == 200
     assert client.get(f"/api/runs/{rid}").json["reviews"][-1]["outcome"] == "ISSUE_REOPENED"
     assert client.post(f"/api/runs/{rid}/issues/not-real", json={"reviewer": "Tester", "acknowledged": True}, headers=headers).status_code == 400
+
+
+def test_failed_ocr_uses_original_document_ai(client, monkeypatch):
+    monkeypatch.setattr(web, "read_document_cached", lambda *args: (_ for _ in ()).throw(RuntimeError("OCR unavailable")))
+    seen = []
+    def vision(raw, suffix, config):
+        seen.append((raw, suffix))
+        return {"status": "COMPLETED", "text": invoice_text(), "pages": 1, "model": "vision-test"}
+    monkeypatch.setattr(web, "read_document_with_ai", vision)
+    raw = pdf(invoice_text())
+    row = submit(client, raw)
+    assert seen == [(raw, ".pdf")]
+    assert row["method"] == "ai_vision"
+    assert row["status"] == "APPROVED"
+    assert row["ai_extraction"]["source"] == "original_page_images"
+
+
+def test_failed_ocr_and_ai_never_auto_approves(client, monkeypatch):
+    monkeypatch.setattr(web, "read_document_cached", lambda *args: (_ for _ in ()).throw(RuntimeError("OCR unavailable")))
+    monkeypatch.setattr(web, "read_document_with_ai", lambda *args: {"status": "UNAVAILABLE", "error": "Provider timeout"})
+    assert submit(client, pdf(invoice_text()))["status"] == "FAILED"
+
+
+def test_ai_vision_sends_page_images_and_reads_json(monkeypatch):
+    captured = []
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, *args):
+            return json.dumps({"choices": [{"message": {"content": json.dumps({"text": invoice_text(), "bill_kind": "tax_invoice", "already_paid": False})}}]}).encode()
+    def open_request(req, timeout):
+        captured.append(json.loads(req.data))
+        return Response()
+    monkeypatch.setattr(ai_extraction.request, "urlopen", open_request)
+    result = ai_extraction.read_document_with_ai(pdf(invoice_text()), ".pdf", {"endpoint": "https://example.com/v1/chat/completions", "model": "vision", "api_key": "test-only"})
+    assert result["status"] == "COMPLETED"
+    assert result["text"] == invoice_text()
+    content = captured[0]["messages"][0]["content"]
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert result["already_paid"] is False

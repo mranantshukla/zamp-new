@@ -73,9 +73,9 @@ def test_possible_duplicate_with_different_number_routes_to_review(client):
     write_pos(client, "po_number,vendor,po_amount,invoiced_to_date\nPO-1,Acme Supplies,5000,0\n")
     assert submit(client, pdf(invoice_text(number="ORIG-1")))["status"] == "APPROVED"
     lookalike = submit(client, pdf(invoice_text(number="ORIG-1-R")))
-    assert lookalike["status"] == "PENDING_REVIEW"
+    assert lookalike["status"] == "APPROVED"
     check = next(c for c in lookalike["decision"]["checks"] if c["check"] == "possible_duplicate")
-    assert check["outcome"] == "UNCERTAIN"
+    assert check["outcome"] == "ADVISORY"
     # A different invoice date is a legitimate repeat order, not a lookalike.
     assert submit(client, pdf(invoice_text(number="ORIG-2", date="2026-11-11")))["status"] == "APPROVED"
 

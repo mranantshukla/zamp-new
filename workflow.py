@@ -41,13 +41,15 @@ TEAMS = {
     "Treasury & Fraud": {"hours": 8, "handles": "Possible duplicates, GSTIN mismatches and identity problems"},
     "Vendor Management": {"hours": 48, "handles": "Unknown or blocked vendors"},
     "Procurement": {"hours": 48, "handles": "Missing, closed or over-billed purchase orders"},
+    "Controller approval": {"hours": 24, "handles": "High-value invoices"},
     "AP Specialist": {"hours": 24, "handles": "Unreadable documents, missing details and arithmetic"},
 }
 
 # Highest-risk first: a payment-integrity concern outranks a paperwork gap.
 ROUTES = (
-    ("Treasury & Fraud", {"payment_change", "possible_duplicate", "vendor_gstin_match", "vendor_identity",
+    ("Treasury & Fraud", {"bank_account_match", "sender_domain", "payment_change", "possible_duplicate", "vendor_gstin_match", "vendor_identity",
                           "seller_buyer_distinct", "seller_gstin", "buyer_gstin"}),
+    ("Controller approval", {"approval_authority"}),
     ("Vendor Management", {"vendor_master", "vendor_authorisation"}),
     ("Procurement", {"po_match", "po_authorisation", "po_remaining", "po_balance_available", "vendor_match"}),
     ("AP Specialist", set()),  # fallback for everything else

@@ -114,7 +114,7 @@
     if (r.status === 'RUNNING') return 'Reading the document';
     if (r.status === 'FAILED') return 'Upload again';
     if (o === 'Filed') return 'Kept for reference';
-    if (o.startsWith('Approved')) return 'Ready for payment';
+    if (o.startsWith('Approved')) return r.invoice?.details?.already_paid ? 'Recorded as already paid' : 'Ready for payment';
     if (o.startsWith('Rejected')) return 'Write to supplier';
     return `With ${route(r)?.team || 'AP Specialist'}`;
   }
@@ -739,9 +739,9 @@
     const steps = [
       ['Fingerprint the file', 'Identical files are recognised, so a document is never read twice.', 'auto', 'Automatic'],
       ['Read the text', 'Digital PDFs give up their text directly; scans and photos are read with OCR on this server.', 'auto', 'Automatic'],
-      ['Identify the document', 'Tax invoice, purchase order, delivery challan, credit note… Only tax invoices can be paid.', 'rule', 'Rule'],
+      ['Identify the document', 'Tax invoice, purchase order, delivery challan, credit note… Bills and receipts enter checking; quotes and delivery documents are filed.', 'rule', 'Rule'],
       ['Pick out the details', 'Supplier, invoice number, dates, PO, GSTIN and amounts — each stored with the text it sat beside.', 'rule', 'Rule'],
-      ['Optional AI pass', 'A language model may fill gaps, but only with a quote that is found on the page. It never decides.', 'ai', 'Optional AI'],
+      ['Optional AI pass', 'When OCR fails or misses key fields, a vision model reads the original page images. Rules then check the extracted amounts and payment risks.', 'ai', 'Optional AI'],
       ['Check the supplier', 'On the supplier list? Not blocked? GSTIN valid and matching what is on file?', 'rule', 'Rule'],
       ['Match the order', 'Find the purchase order, confirm it is open, and that this bill fits what is left on it.', 'rule', 'Rule'],
       ['Do the maths', 'Subtotal and tax add up to the total; CGST, SGST and IGST are consistent.', 'rule', 'Rule'],
@@ -763,7 +763,7 @@
         </div>
       </div>
       <section class="panel mt"><div class="outcomes">
-        <div><span class="tag ok" style="justify-self:start"><i>✓</i>Approved</span><p>Every check passed. It is recorded as ready for payment and nobody has to touch it.</p></div>
+        <div><span class="tag ok" style="justify-self:start"><i>✓</i>Approved</span><p>No blocking payment risk was found. Routine issues are reported for acknowledgement.</p></div>
         <div><span class="tag warn" style="justify-self:start"><i>!</i>Exception</span><p>Something is missing, unreadable or unusual. A person on the right team approves or rejects it; the automatic call is kept alongside for audit.</p></div>
         <div><span class="tag bad" style="justify-self:start"><i>×</i>Rejected</span><p>Not payable as sent — already cleared, over the PO, a blocked supplier, or totals that don't add up. A note to the supplier is drafted.</p></div>
       </div></section>

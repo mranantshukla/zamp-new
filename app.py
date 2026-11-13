@@ -28,7 +28,7 @@ import asa_invoice_processor as processor
 from asa_invoice_processor import classify_document, extract_invoice, read_document
 from asa_dashboard import dataset_rows, dataset_image_bytes, evaluate_dataset
 from ai_review import review_invoice
-from ai_extraction import _call_model, reconcile_ocr
+from ai_extraction import _call_model, reconcile_ocr, read_document_with_ai
 
 ROOT = Path(__file__).parent
 app = Flask(__name__)
@@ -77,9 +77,9 @@ def _login_blocked(key):
 # are the persistent deployment configuration; the dashboard form is useful for
 # a local demo session.
 AI_RUNTIME_CONFIG = {
-    "endpoint": os.getenv("AI_REVIEW_API_URL", "").strip(),
-    "model": os.getenv("AI_REVIEW_MODEL", "").strip(),
-    "api_key": os.getenv("AI_REVIEW_API_KEY", ""),
+    "endpoint": os.getenv("AI_REVIEW_API_URL", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions").strip(),
+    "model": os.getenv("AI_REVIEW_MODEL", "gemini-3.1-flash-lite").strip(),
+    "api_key": os.getenv("AI_REVIEW_API_KEY") or os.getenv("GEMINI_API_KEY", ""),
 }
 
 STAGE_NAMES = ["Document received", "PDF text / OCR", "Document classification", "Field extraction",
@@ -186,7 +186,20 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         stage(rid, current, "COMPLETED", f"{len(raw)} bytes received")
         current = "PDF text / OCR"; stage(rid, current, "RUNNING")
         ocr_started = time.monotonic()
-        text, method, pages, cache_hit = read_document_cached(raw, suffix)
+        ocr_error = None
+        try:
+            text, method, pages, cache_hit = read_document_cached(raw, suffix)
+        except Exception as exc:
+            ocr_error = type(exc).__name__
+            text, method, pages, cache_hit = "", "ocr_failed", 0, False
+        preliminary = extract_invoice(text)
+        vision = None
+        if ocr_error or preliminary.get("subtotal") is None or not preliminary.get("total") or sum(bool(preliminary.get(k)) for k in ("vendor", "invoice_number", "date", "total")) < 3:
+            vision = read_document_with_ai(raw, suffix, AI_RUNTIME_CONFIG)
+            if vision["status"] == "COMPLETED":
+                text, method, pages = vision["text"], "ai_vision", vision["pages"]
+            elif ocr_error:
+                raise RuntimeError("OCR failed and AI fallback is " + vision["status"].lower())
         ocr_seconds = time.monotonic() - ocr_started
         stage(rid, current, "COMPLETED", f"{method}; {pages} page(s); {ocr_seconds:.2f}s" + ("; cached" if cache_hit else ""))
         current = "Document classification"; stage(rid, current, "RUNNING")
@@ -195,12 +208,22 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         stage(rid, current, "COMPLETED", f"{kind}; {routing['reason']}")
         current = "Field extraction"; stage(rid, current, "RUNNING")
         invoice = extract_invoice(text)
+        if vision and vision["status"] == "COMPLETED":
+            invoice["details"].update({k: vision[k] for k in ("bill_kind", "already_paid") if k in vision})
+            for metadata in invoice.get("field_metadata", {}).values():
+                metadata.update(method="ai_vision", reliability="CONTEXTUAL", validation_status="AI_TRANSCRIBED")
+            if kind == "UNKNOWN" and vision.get("bill_kind") and invoice.get("total") is not None:
+                kind = invoice["document_type"] = "TAX_INVOICE"
+                routing = document_routing(kind)
         stage(rid, current, "COMPLETED", f"{sum(bool(invoice.get(k)) for k in ('invoice_number','vendor','po_number','date','total'))}/5 key fields detected")
         current = "AI OCR reconciliation"; stage(rid, current, "RUNNING")
         # Optional: reconcile OCR text before decisioning. Dataset labels are
         # intentionally unavailable here and unsupported proposals are dropped.
         ai_started = time.monotonic()
-        if routing["status"] != "INVOICE_AP_WORKFLOW":
+        if vision and vision["status"] == "COMPLETED":
+            ai_extraction = {"status": "COMPLETED", "source": "original_page_images", "model": vision["model"],
+                             "accepted_fields": [k for k in ("vendor", "invoice_number", "date", "total") if invoice.get(k)]}
+        elif routing["status"] != "INVOICE_AP_WORKFLOW":
             ai_extraction = {"status": "SKIPPED", "accepted_fields": [], "reason": routing["reason"]}
         else:
             invoice, ai_extraction = reconcile_ocr(invoice, text, AI_RUNTIME_CONFIG)
@@ -243,7 +266,7 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
             final_stages = [
                 ("Vendor verification", "COMPLETED" if checks.get("vendor_master", {}).get("passed") else "BLOCKED",
                  checks.get("vendor_master", {}).get("detail", "Vendor unverified")),
-                ("PO matching", "COMPLETED" if decision.po_matching["status"] == "MATCHED" else "BLOCKED",
+                ("PO matching", "COMPLETED" if decision.po_matching["status"] in ("MATCHED", "INFERRED") else "BLOCKED",
                  decision.po_matching["explanation"]),
                 ("Financial validation", "COMPLETED" if decision.financial_validation["status"] == "PASSED" else "BLOCKED",
                  decision.financial_validation["status"]),

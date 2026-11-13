@@ -17,9 +17,9 @@ MAX_BYTES = 1024 * 1024
 MAX_ROWS = 10000
 KINDS = {
     "po_master": {"file": "pos.csv", "required": ("po_number", "vendor", "po_amount", "invoiced_to_date"),
-                  "optional": ("status", "gstin", "currency")},
+                  "optional": ("status", "gstin", "currency", "lines", "receipt_required")},
     "vendor_master": {"file": "vendor_master.csv", "required": ("vendor",),
-                      "optional": ("gstin", "status")},
+                      "optional": ("gstin", "status", "bank_account", "ifsc", "email_domain")},
 }
 PO_STATUSES = {"", "OPEN", "APPROVED", "BLOCKED", "CLOSED", "PROHIBITED"}
 VENDOR_STATUSES = {"", "APPROVED", "ACTIVE", "BLOCKED", "PROHIBITED", "UNAUTHORISED"}
@@ -74,6 +74,16 @@ def parse(kind: str, content: str) -> list[dict]:
             if isinstance(clean["po_amount"], float) and isinstance(clean["invoiced_to_date"], float) \
                     and clean["invoiced_to_date"] > clean["po_amount"] + 0.01:
                 errors.append(f"Row {line}: invoiced_to_date exceeds po_amount")
+            if clean.get("lines"):
+                import json
+                try:
+                    items = json.loads(clean["lines"])
+                    if not isinstance(items, list): raise ValueError()
+                    for item in items:
+                        if not isinstance(item, dict) or not all(k in item for k in ("description", "sku", "unit_price", "qty")): raise ValueError()
+                        if float(item["unit_price"]) < 0 or float(item["qty"]) < 0: raise ValueError()
+                except (ValueError, TypeError, KeyError): errors.append(f"Row {line}: lines must be a JSON array with description, sku, unit_price and qty")
+            clean["receipt_required"] = clean.get("receipt_required", "").lower() in ("true", "1", "yes")
             if status not in PO_STATUSES:
                 errors.append(f"Row {line}: unknown PO status {status}")
         else:

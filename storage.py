@@ -311,7 +311,7 @@ def locked_decision(rid, invoice, po_path, method, extra=None, finalize=None, ma
             final_extra, final_stages = finalize(decision) if finalize else ({}, [])
             payload = {"invoice": decision.invoice, "invoice_number": invoice.get("invoice_number"),
                        "vendor": invoice.get("vendor"), "gstin": invoice.get("gstin"),
-                       "po_number": invoice.get("po_number"), "total": invoice.get("total"),
+                       "po_number": invoice.get("po_number") or (decision.matched_po or {}).get("po_number"), "total": invoice.get("total"),
                        "due_date": (invoice.get("details") or {}).get("due_date"),
                        "document_type": decision.document_type, "method": method,
                        "decision": decision.__dict__, "reasons": decision.reasons,
@@ -359,9 +359,11 @@ def resolve_run(rid, action, reviewer, note, corrections, recheck):
             if action == "APPROVED":
                 decision = recheck(invoice, _decision_history(conn, invoice, exclude=rid))
                 recheck_result = {"status": decision.status, "reasons": decision.reasons}
-                if decision.status == "REJECTED":
+                monetary_blocks = {"po_remaining", "invoice_math", "gst_components", "payment_change", "bank_account_match", "sender_domain", "duplicate_without_number", "amount_readable", "po_line_match", "line_arithmetic", "goods_received"}
+                blocking = [c["detail"] for c in decision.checks if c.get("outcome") == "CONFIRMED_VIOLATION" or (not c.get("passed") and c.get("check") in monetary_blocks and c.get("outcome") != "ADVISORY")]
+                if decision.status == "REJECTED" or blocking:
                     # Name only the rules that block approval, not review-level notes.
-                    blocking = [c["detail"] for c in decision.checks if c.get("outcome") == "CONFIRMED_VIOLATION"]
+                    # Monetary and security holds cannot be waived by an acknowledgement.
                     raise ResolutionConflict("Cannot approve: " + "; ".join(blocking[:3] or decision.reasons[:2]))
             outcome = "APPROVED_BY_REVIEWER" if action == "APPROVED" else "REJECTED_BY_REVIEWER"
             payload["resolution_detail"] = {"status": action, "reviewer": reviewer, "note": note, "at": now().isoformat(),

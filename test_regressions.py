@@ -84,16 +84,16 @@ def test_partial_po_cumulative_and_overage(tmp_path):
     assert processor.decide(first, po, history).status == "APPROVED"
     history.write_text(json.dumps([{"vendor":"Acme Supplies", "invoice_number":"A", "po_number":"PO-1", "total":400, "status":"APPROVED"}]))
     assert processor.decide(invoice("B", 600), po, history).status == "APPROVED"
-    assert processor.decide(invoice("B", 601), po, history).status == "REJECTED"
-    assert processor.decide(invoice("C", 1001), po, history).status == "REJECTED"
+    assert processor.decide(invoice("B", 601), po, history).status == "PENDING_REVIEW"
+    assert processor.decide(invoice("C", 1001), po, history).status == "PENDING_REVIEW"
 
 
 def test_ocr_arithmetic_discrepancy_pending(tmp_path):
     po, history = fixture(tmp_path)
     inv = invoice(); inv.update(subtotal=800, tax=100)
     assert processor.decide(inv, po, history, method="ocr").status == "PENDING_REVIEW"
-    assert processor.decide(inv, po, history, method="text").status == "REJECTED"
-    assert processor.decide(invoice(), po, history, method="ocr").status == "PENDING_REVIEW"
+    assert processor.decide(inv, po, history, method="text").status == "PENDING_REVIEW"
+    assert processor.decide(invoice(), po, history, method="ocr").status == "APPROVED"
 
 
 def test_gst_component_reconciliation(tmp_path):
@@ -429,6 +429,53 @@ def test_records_issues_do_not_hold_safe_invoice(tmp_path):
     result = processor.decide(inv, po, history)
     assert result.status == "APPROVED"
     assert {c["check"] for c in result.checks if c["outcome"] == "ADVISORY"} == {"invoice_date_missing", "buyer_gstin"}
-    # Removing the reference disables reliable duplicate protection: still a real risk.
+    # Reference policy reports missing references while running other controls.
     inv["invoice_number"] = None
+    assert processor.decide(inv, po, history).status == "APPROVED"
+
+
+def test_reference_everyday_bill_and_rounding(tmp_path):
+    po, history = fixture(tmp_path, amount=5000)
+    inv = invoice(total=1005)
+    inv.update(subtotal=1000, tax=0)
+    assert processor.decide(inv, po, history).status == "APPROVED"
+    inv.update(po_number=None, vendor="New cafe", invoice_number=None)
+    inv["details"] = {"bill_kind": "other_bill", "already_paid": True}
+    result = processor.decide(inv, po, history)
+    assert result.status == "APPROVED"
+    inv["total"] = None
     assert processor.decide(inv, po, history).status == "PENDING_REVIEW"
+
+
+def test_reference_missing_number_repeat_still_rejected(tmp_path):
+    po, history = fixture(tmp_path, amount=5000)
+    inv = invoice(); inv["invoice_number"] = None
+    rows = [{"vendor": inv["vendor"], "invoice_number": "OLD", "date": inv["date"], "total": inv["total"], "status": "APPROVED"}]
+    assert processor.decide(inv, po, history_rows=rows).status == "REJECTED"
+
+
+def test_reference_bank_and_domain_fraud_controls(tmp_path):
+    po, history = fixture(tmp_path)
+    inv = invoice()
+    inv["details"] = {"account_number": "999999999", "ifsc": "HDFC0000001", "email": "ap@acme-billing.com"}
+    master = [{"vendor": "Acme Supplies", "status": "ACTIVE", "bank_account": "111111111", "ifsc": "HDFC0000001", "email_domain": "acme.com"}]
+    result = processor.decide(inv, po, history, vendor_master=master)
+    assert result.status == "PENDING_REVIEW"
+    assert any(c["check"] == "bank_account_match" for c in result.checks)
+    inv["details"]["account_number"] = "111111111"
+    inv["details"]["email"] = "ap@acme.com"
+    assert processor.decide(inv, po, history, vendor_master=master).status == "APPROVED"
+
+
+def test_reference_inferred_po_requires_clear_structured_match(tmp_path):
+    po, history = fixture(tmp_path, amount=1000)
+    inv = invoice(); inv["po_number"] = None
+    inv["line_items"] = [{"description": "Office paper", "quantity": 10, "unit_price": 100, "amount": 1000}]
+    pos = [{"po_number": "PO-1", "vendor": "Acme Supplies", "po_amount": 1000, "invoiced_to_date": 0, "lines": [{"description": "Office paper", "sku": "PAPER", "qty": 10, "unit_price": 100, "received_qty": 10}], "receipt_required": True}]
+    result = processor.decide(inv, po, history, pos=pos)
+    assert result.status == "APPROVED"
+    assert result.po_matching["status"] == "INFERRED"
+    pos[0]["lines"][0]["received_qty"] = 1
+    result = processor.decide({**inv, "po_number": "PO-1"}, po, history, pos=pos)
+    assert result.status == "PENDING_REVIEW"
+    assert any(c["check"] == "goods_received" and not c["passed"] for c in result.checks)

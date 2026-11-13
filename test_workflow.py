@@ -60,7 +60,7 @@ def test_reviewer_approval_closes_queue_and_counts_in_ledger(client):
     # Reviewer-approved invoice blocks a duplicate and consumed PO-1's full balance.
     assert submit(client, pdf(invoice_text(number="R-1")))["status"] == "REJECTED"
     over = submit(client, pdf(invoice_text(number="R-2", subtotal="1.00", tax="0.00", total="1.00")))
-    assert over["status"] == "REJECTED" and any("remaining PO=0.00" in r for r in over["reasons"])
+    assert over["status"] == "PENDING_REVIEW" and any("remaining PO=0.00" in r for r in over["reasons"])
     assert client.get("/api/master/po_master").json["rows"][0]["approved_value"] == 1000.0
 
 

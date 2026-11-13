@@ -26,9 +26,9 @@ services:
       # Optional Gemini/OpenAI-compatible extraction configuration. Supply
       # these in Render; the API key never reaches the browser or repository.
       - key: AI_REVIEW_API_URL
-        sync: false
+        value: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
       - key: AI_REVIEW_MODEL
-        sync: false
+        value: gemini-3.1-flash-lite
       - key: AI_REVIEW_API_KEY
         sync: false
       - key: AI_REQUEST_TIMEOUT

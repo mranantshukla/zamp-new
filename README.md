@@ -127,3 +127,10 @@ The live monitor checks for stage updates once per second for up to 15 minutes. 
 
 
 Reference-informed controls: separately labelled freight charges are included in arithmetic alongside discounts, GST and rounding. Copy markings are excluded from supplier-name fallback. Future dates are advisory. Announced bank-account changes route to Treasury & Fraud for independent verification. Missing identity, references, financial evidence or PO authority still block approval because they prevent payee, duplicate or overpayment checks.
+
+
+### Reference bill policy and AI fallback
+
+`reference_bill_policy.py` ports bill-policy semantics from `akshcatt/Zamp-ai` (`app/pipeline.py`): missing references, dates, OCR confidence and tax-format findings are reported; everyday bills can be recorded without a PO; exact duplicates and blocked vendors reject; changed invoice amounts, bank changes, arithmetic differences and cumulative PO overruns hold. Rounding uses the smaller of INR 10 and 2% of the compared amount. Amounts of INR 25 lakh or more require controller approval. Bank-account and look-alike email checks use optional `bank_account`, `ifsc` and `email_domain` vendor-master columns. No payment is sent by this app.
+
+If OCR fails, returns no total or reads fewer than three key fields, the configured vision model reads the original page images (up to six pages). AI transcription provenance is recorded and the deterministic bill rules still decide. Provider failures never turn into approval. The default Render model is Gemini 3.1 Flash-Lite through its OpenAI-compatible endpoint; set `AI_REVIEW_API_KEY` in Render. Uploaded pages are sent to the configured AI provider when fallback runs. PO line inference and goods-receipt matching are enabled when the PO CSV includes a `lines` JSON array (description, sku, unit_price, qty, and optional received_qty) and `receipt_required`. Aggregate balance checks remain active for existing CSVs.

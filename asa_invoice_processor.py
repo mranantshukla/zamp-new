@@ -61,6 +61,7 @@ def classify_document(text: str) -> str:
         (r"\bDEBIT\s*NOTE\b", "DEBIT_NOTE"),
         (r"\bPRO\s*FORMA\s*INVOICE\b", "PROFORMA_INVOICE"),
         (r"\b(?:TAX\s*INVOICE|TAXINVOICE|TAR\s*INVOICE)\b", "TAX_INVOICE"),
+        (r"\b(?:CASH\s*MEMO|RECEIPT|ELECTRICITY\s*BILL|RESTAURANT\s*BILL|UTILITY\s*BILL)\b", "TAX_INVOICE"),
     )
     # An invoice can mention a purchase order or delivery challan. Treat the
     # first document title as the heading instead of giving references priority.
@@ -456,7 +457,10 @@ def extract_invoice(text: str) -> dict:
                 line_items.append(item)
         line_items = line_items[:20]
 
+    everyday = re.search(r"\b(?:cash\s*memo|receipt|electricity\s*bill|restaurant\s*bill|utility\s*bill)\b", text, re.I)
     details = {
+        "bill_kind": "other_bill" if everyday else "tax_invoice",
+        "already_paid": bool(re.search(r"\b(?:paid\s+(?:by|via|in)\s+(?:cash|card|upi)|payment\s+received)\b", text, re.I)),
         "seller": vendor, "buyer": buyer, "buyer_gstin": buyer_gstin,
         "identity_ambiguous": identity_ambiguous,
         "billing_address": billing_address, "shipping_address": shipping_address,
@@ -465,7 +469,7 @@ def extract_invoice(text: str) -> dict:
         "customer_number": customer_number, "payment_terms": payment_terms,
         "place_of_supply": place_of_supply, "tax_type": tax_type, "salesperson": salesperson,
         "pan": pan, "phone": phone, "email": email, "reverse_charge": reverse_charge,
-        "bank_name": bank_name, "account_last4": account[-4:] if account else None, "ifsc": ifsc,
+        "bank_name": bank_name, "account_number": account, "account_last4": account[-4:] if account else None, "ifsc": ifsc,
         "shipping_amount": money(shipping_raw), "rounded_off": money(rounded_off_raw), "taxable_amount": money(subtotal_raw), "tax_breakdown": tax_breakdown,
         "po_total": money(po_total_raw),
     }
@@ -542,9 +546,14 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
         check("ocr_field_evidence", not weak,
               "Critical OCR fields lack required source evidence: " + ", ".join(weak) if weak else
               "Critical OCR fields have direct label evidence; this is not a calibrated probability", "review")
-    po_candidates = [p for p in pos if normalize_po(inv.get("po_number")) and normalize_po(p["po_number"]) == normalize_po(inv.get("po_number"))]
+    inferred_po = None
+    if not inv.get("po_number"):
+        from reference_bill_policy import infer_purchase_order
+        inferred_po = infer_purchase_order(inv, pos)
+    matching_reference = inv.get("po_number") or (inferred_po or {}).get("po_number")
+    po_candidates = [p for p in pos if normalize_po(matching_reference) and normalize_po(p["po_number"]) == normalize_po(matching_reference)]
     po = po_candidates[0] if len(po_candidates) == 1 else None
-    po_status = "NOT_IDENTIFIED" if not inv.get("po_number") else "AMBIGUOUS" if len(po_candidates) > 1 else "NOT_FOUND" if not po else "MATCHED"
+    po_status = "INFERRED" if inferred_po else "NOT_IDENTIFIED" if not inv.get("po_number") else "AMBIGUOUS" if len(po_candidates) > 1 else "NOT_FOUND" if not po else "MATCHED"
     po_detail = (f"Matched {po['po_number']} against PO master" if po else
                  "No PO reference identified on document" if po_status == "NOT_IDENTIFIED" else
                  f"More than one master PO matches {inv.get('po_number')}" if po_status == "AMBIGUOUS" else
@@ -657,6 +666,11 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
         if item["check"] in ("invoice_date_future", "buyer_gstin") and not item["passed"]:
             item["outcome"] = "ADVISORY"
             item["category"] = "advisory"
+    from reference_bill_policy import apply_bill_policy
+    checks = apply_bill_policy(inv, checks, history, po, master)
+    reasons = [c["detail"] for c in checks if c["outcome"] != PASS]
+    financial_checks = [c for c in checks if c["check"] in financial_names + ("invoice_arithmetic_available", "po_balance_available") and c["outcome"] != "ADVISORY"]
+    financial_status = "PASSED" if all(c["passed"] for c in financial_checks) else "BLOCKED_MISSING_DATA" if any(c["outcome"] == BLOCKED for c in financial_checks) else "PARTIALLY_VALIDATED"
     status = resolve(checks)
     if status == "REJECTED":
         status, action, confidence = "REJECTED", "Route to AP exception queue", "HIGH"

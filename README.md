@@ -1,6 +1,6 @@
 # zamp infinity
 
-*The potential is almost infinite.*
+*The potential is always infinite.*
 
 Accounts payable invoice intelligence (formerly ASA Invoice Intelligence).
 

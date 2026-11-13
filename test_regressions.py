@@ -104,6 +104,7 @@ def test_gst_component_reconciliation(tmp_path):
     inv["details"]["tax_breakdown"]["SGST"]["amount"] = 80
     assert processor.decide(inv,po,history,method="text").status == "REJECTED"
     assert processor.decide(inv,po,history,method="ocr").status == "PENDING_REVIEW"
+    assert processor.decide(inv,po,history,method="ai_vision").status == "PENDING_REVIEW"
 
 
 def test_run_monitor_reports_check_outcomes(tmp_path):

@@ -109,7 +109,7 @@ def test_parse_date_formats():
 # --- List API, compression, events ----------------------------------------
 
 def test_runs_list_is_slim_paginated_and_shows_latest_review(client):
-    rows = [submit(client, pdf(invoice_text(number=f"PAGE-{i}", po=""))) for i in range(3)]
+    rows = [submit(client, pdf(invoice_text(number=f"PAGE-{i}", po="", subtotal="800.00"))) for i in range(3)]
     csrf = csrf_of(client)
     client.post(f"/api/runs/{rows[0]['run_id']}/reviews", json={"reviewer": "R1", "outcome": "VERIFIED", "note": ""},
                 headers={"X-CSRF-Token": csrf})
@@ -176,7 +176,7 @@ def test_master_data_validation_storage_and_use_in_decisions(client):
         "csv": "﻿PO_Number,Vendor,PO_Amount,Invoiced_To_Date\nPO-77,Acme Supplies,\"2,000\",500\n", "updated_by": "AP lead"})
     assert ok.status_code == 200 and ok.json["saved"] == 1
     # PO-1 was only in the file; decisions now use the database master.
-    assert submit(client, pdf(invoice_text(number="M-1")))["status"] == "PENDING_REVIEW"
+    assert submit(client, pdf(invoice_text(number="M-1")))["status"] == "APPROVED"
     approved = submit(client, pdf(invoice_text(number="M-2", po="PO-77")))
     assert approved["status"] == "APPROVED"
     po = client.get("/api/master/po_master").json
@@ -205,7 +205,7 @@ def test_correction_recheck_uses_database_master(client):
     csrf = csrf_of(client)
     client.put("/api/master/po_master", headers={"X-CSRF-Token": csrf}, json={
         "csv": "po_number,vendor,po_amount,invoiced_to_date\nPO-55,Acme Supplies,1000,0\n", "updated_by": "AP"})
-    row = submit(client, pdf(invoice_text(number="FIX-1", po="")))
+    row = submit(client, pdf(invoice_text(number="FIX-1", po="", subtotal="800.00")))
     response = client.post(f"/api/runs/{row['run_id']}/reviews", headers={"X-CSRF-Token": csrf}, json={
         "reviewer": "R", "outcome": "NEEDS_CORRECTION", "note": "PO on page 2", "corrections": {"po_number": "PO-55"}})
     assert response.json["revised_review_result"]["po_matching"]["status"] == "MATCHED"
@@ -215,7 +215,7 @@ def test_correction_recheck_uses_database_master(client):
 
 def test_analytics_summary_metrics_and_aging(client, monkeypatch):
     approved = submit(client, pdf(invoice_text(number="AG-1", subtotal="400.00", tax="0.00", total="400.00")))
-    submit(client, pdf(invoice_text(number="AG-2", po="")))
+    submit(client, pdf(invoice_text(number="AG-2", po="", subtotal="800.00")))
     submit(client, pdf(invoice_text(heading="DELIVERY CHALLAN", number="CH-9")))
     with storage.engine.begin() as conn:  # Give the approved invoice a past due date.
         conn.execute(storage.runs.update().where(storage.runs.c.id == approved["run_id"]).values(due_date="01/01/2020"))

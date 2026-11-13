@@ -54,11 +54,11 @@ storage.recover_interrupted()
 # OCR inference is already serialized by a process-wide lock, so extra threads
 # only add memory pressure. A bounded pool queues batch uploads instead of
 # starting up to 25 concurrent threads that each hold document bytes.
-PROCESSING_WORKERS = max(1, min(8, int(os.getenv("PROCESSING_WORKERS", "2"))))
+PROCESSING_WORKERS = max(1, min(8, int(os.getenv("PROCESSING_WORKERS", "1"))))
 executor = ThreadPoolExecutor(max_workers=PROCESSING_WORKERS, thread_name_prefix="asa-run")
 
 def submit_run(*args):
-    executor.submit(process_run, *args)
+    executor.submit(process_run, *args, use_ocr=request.args.get("ocr") == "1")
 
 LOGIN_WINDOW_SECONDS, LOGIN_MAX_FAILURES = 300, 5
 login_failures = defaultdict(deque)
@@ -195,7 +195,7 @@ ocr_reader_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-read
 ai_reader_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ai-reader")
 
 
-def read_parallel(raw, suffix, rid=None):
+def read_parallel(raw, suffix, rid=None, use_ocr=False):
     """Race independent readers for scans; a usable text PDF avoids model cost."""
     def report(name, status, detail):
         if rid: stage(rid, name, status, detail)
@@ -217,6 +217,15 @@ def read_parallel(raw, suffix, rid=None):
             text_layer = "\n".join(page.get_text() for page in doc)
         if len(text_layer.strip()) >= 80:
             return local_only("Readable PDF text; image AI not needed")
+    if not use_ocr:
+        report("OCR reader", "SKIPPED", "Optional OCR is off")
+        report("AI image reader", "RUNNING", "Reading document with AI")
+        result = read_document_with_ai(raw, suffix, dict(AI_RUNTIME_CONFIG))
+        if result.get("status") != "COMPLETED":
+            report("AI image reader", "FAILED", "AI could not read document; retry or enable OCR")
+            raise RuntimeError("AI reader unavailable; retry or enable optional OCR")
+        report("AI image reader", "COMPLETED", "AI document read completed")
+        return result["text"], "ai_vision", result["pages"], False, result
     selected = set()
     def run_reader(name, fn, *args):
         report(name, "RUNNING", "Reading in parallel")
@@ -266,7 +275,7 @@ def read_parallel(raw, suffix, rid=None):
             if name not in selected: report(name, "SKIPPED", "Result not used; another reader finished first or the deadline was reached")
 
 
-def process_run(rid, raw, suffix, event_type="upload", label=None):
+def process_run(rid, raw, suffix, event_type="upload", label=None, use_ocr=False):
     started = time.monotonic()
     current = "Document received"
     try:
@@ -277,7 +286,7 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         ocr_started = time.monotonic()
         ocr_error = None
         try:
-            text, method, pages, cache_hit, vision = read_parallel(raw, suffix, rid)
+            text, method, pages, cache_hit, vision = read_parallel(raw, suffix, rid, use_ocr)
         except Exception as exc:
             ocr_error = type(exc).__name__
             text, method, pages, cache_hit = "", "ocr_failed", 0, False

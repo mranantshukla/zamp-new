@@ -316,12 +316,12 @@
     try {
       if (valid.length === 1) {
         const form = new FormData(); form.append('invoice_file', valid[0]);
-        const { run_id } = await api('/api/runs', { method: 'POST', body: form });
+        const { run_id } = await api(`/api/runs?ocr=${$('#optional-ocr')?.checked ? 1 : 0}`, { method: 'POST', body: form });
         go(`#/invoice/${run_id}?from=upload`); return;
       }
       if (valid.length > 25) { toast('Up to 25 documents at a time', { tone: 'bad' }); return; }
       const form = new FormData(); valid.forEach((f) => form.append('invoice_files', f));
-      const { runs } = await api('/api/runs/bulk', { method: 'POST', body: form });
+      const { runs } = await api(`/api/runs/bulk?ocr=${$('#optional-ocr')?.checked ? 1 : 0}`, { method: 'POST', body: form });
       runs.forEach((r) => batch.unshift({ name: r.source, run_id: r.run_id }));
       toast(`${plural(runs.length, 'document')} on their way`);
       repaintBatch(); trackBatch(alive);
@@ -335,6 +335,7 @@
     const samples = APP.samples || [];
     view.innerHTML = `
       ${intro('Bring in invoices', 'PDFs, scans or phone photos. A single file opens its live view; several files run together and are tracked below.')}
+      <label class="row small" style="margin-bottom:16px"><input type="checkbox" id="optional-ocr"> Also run OCR (optional; slower on scans). AI reads images by default.</label>
       <div class="intake">
         <div>
           <label class="drop" id="dropzone" tabindex="0">
@@ -381,7 +382,7 @@
       toast('Scenario library finished', { action: { href: '#/', label: 'See Today →' } });
     });
     $('#rundataset')?.addEventListener('click', async () => {
-      try { const { run_id } = await api(`/api/samples/${$('#datasetpick').value}`, { method: 'POST' }); go(`#/invoice/${run_id}?from=upload`); }
+      try { const { run_id } = await api(`/api/samples/${$('#datasetpick').value}?ocr=${$('#optional-ocr')?.checked ? 1 : 0}`, { method: 'POST' }); go(`#/invoice/${run_id}?from=upload`); }
       catch (err) { toast(err.message, { tone: 'bad' }); }
     });
     repaintBatch();

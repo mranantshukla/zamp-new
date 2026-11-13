@@ -32,11 +32,11 @@ def test_route_priority_and_labels():
 
 
 def test_pending_invoice_is_routed_and_queued(client):
-    row = submit(client, pdf(invoice_text(number="Q-1", po="")))
-    assert row["review_route"]["team"] == "Procurement"
+    row = submit(client, pdf(invoice_text(number="Q-1", po="", subtotal="800.00")))
+    assert row["review_route"]["team"] == "AP Specialist"
     queue = client.get("/api/runs?open=1")
     assert [r["run_id"] for r in queue.json] == [row["run_id"]] and queue.headers["X-Total-Count"] == "1"
-    assert client.get("/api/runs?open=1&team=Procurement").json[0]["route_team"] == "Procurement"
+    assert client.get("/api/runs?open=1&team=AP Specialist").json[0]["route_team"] == "AP Specialist"
     assert client.get("/api/runs?open=1&team=Treasury %26 Fraud").json == []
     # Filed non-invoices and approved invoices never enter the queue.
     submit(client, pdf(invoice_text(heading="DELIVERY CHALLAN", number="CH-1")))
@@ -45,9 +45,9 @@ def test_pending_invoice_is_routed_and_queued(client):
 
 
 def test_reviewer_approval_closes_queue_and_counts_in_ledger(client):
-    row = submit(client, pdf(invoice_text(number="R-1", po="")))
+    row = submit(client, pdf(invoice_text(number="R-1", po="", subtotal="800.00")))
     # Approve with the PO the reviewer confirmed; the ledger follows the correction.
-    response = resolve(client, row["run_id"], "APPROVED", "Buyer confirmed PO-1", {"po_number": "PO-1"})
+    response = resolve(client, row["run_id"], "APPROVED", "Buyer confirmed PO-1", {"po_number": "PO-1", "subtotal": 820.0})
     assert response.status_code == 200, response.json
     saved = client.get(f"/api/runs/{row['run_id']}").json
     assert saved["status"] == "PENDING_REVIEW"            # automated decision preserved
@@ -65,9 +65,9 @@ def test_reviewer_approval_closes_queue_and_counts_in_ledger(client):
 
 
 def test_approval_blocked_when_ledger_rule_would_break(client):
-    pending = submit(client, pdf(invoice_text(number="LATE-1", po="")))
+    pending = submit(client, pdf(invoice_text(number="LATE-1", po="", subtotal="800.00")))
     assert submit(client, pdf(invoice_text(number="FIRST-1")))["status"] == "APPROVED"  # consumes PO-1
-    blocked = resolve(client, pending["run_id"], "APPROVED", "PO-1", {"po_number": "PO-1"})
+    blocked = resolve(client, pending["run_id"], "APPROVED", "PO-1", {"po_number": "PO-1", "subtotal": 820.0})
     assert blocked.status_code == 409 and "remaining PO" in blocked.json["error"]
     assert client.get(f"/api/runs/{pending['run_id']}").json["resolution"] is None
     # Rejecting is always possible, but needs a reason for the vendor.
@@ -82,7 +82,7 @@ def test_resolve_validation(client):
     assert resolve(client, approved["run_id"], "APPROVED").status_code == 409
     challan = submit(client, pdf(invoice_text(heading="DELIVERY CHALLAN", number="CH-2")))
     assert resolve(client, challan["run_id"], "APPROVED").status_code == 409
-    pending = submit(client, pdf(invoice_text(number="V-1", po="")))
+    pending = submit(client, pdf(invoice_text(number="V-1", po="", subtotal="800.00")))
     assert resolve(client, pending["run_id"], "MAYBE").status_code == 400
     assert resolve(client, pending["run_id"], "APPROVED", reviewer="").status_code == 400
     assert resolve(client, pending["run_id"], "APPROVED", corrections={"bank": "x"}).status_code == 400
@@ -91,16 +91,16 @@ def test_resolve_validation(client):
 
 
 def test_analytics_includes_workflow_metrics(client):
-    pending = submit(client, pdf(invoice_text(number="AN-1", po="")))
+    pending = submit(client, pdf(invoice_text(number="AN-1", po="", subtotal="800.00")))
     submit(client, pdf(invoice_text(number="AN-2", subtotal="400.00", tax="0.00", total="400.00")))
     rejected = submit(client, pdf(invoice_text(number="AN-2", subtotal="400.00", tax="0.00", total="400.00")))
     assert rejected["status"] == "REJECTED"
     s = client.get("/api/analytics/summary").json
     assert s["money_stopped"] == 400.0
     assert s["time_saved_minutes"] == web.MANUAL_MINUTES_PER_INVOICE
-    assert {q["team"]: q["open"] for q in s["queue"]}["Procurement"] == 1
+    assert {q["team"]: q["open"] for q in s["queue"]}["AP Specialist"] == 1
     assert any(r["check"] == "duplicate_detection" and r["rejected"] == 1 for r in s["stop_reasons"])
-    assert any(r["check"] == "po_match" and r["review"] == 1 for r in s["stop_reasons"])
+    assert any(r["check"] == "invoice_math" and r["review"] == 1 for r in s["stop_reasons"])
     assert s["daily"] and sum(d["APPROVED"] + d["PENDING_REVIEW"] + d["REJECTED"] for d in s["daily"]) == 3
     assert [x["stage"] for x in s["step_seconds"]][0] == "Document received"
     resolve(client, pending["run_id"], "REJECTED", "No PO exists")
@@ -113,7 +113,7 @@ def test_analytics_includes_workflow_metrics(client):
 def test_vendor_profiles(client):
     (web.ROOT / "samples" / "vendor_master.csv").write_text("vendor,gstin,status\nAcme Supplies,,APPROVED\nIdle Co,,BLOCKED\n")
     submit(client, pdf(invoice_text(number="VP-1", subtotal="300.00", tax="0.00", total="300.00")))
-    submit(client, pdf(invoice_text(number="VP-2", vendor="Stranger Ltd", po="")))
+    submit(client, pdf(invoice_text(number="VP-2", vendor="Stranger Ltd", po="", subtotal="800.00")))
     vendors = {v["vendor"]: v for v in client.get("/api/vendors").json["vendors"]}
     acme = vendors["Acme Supplies"]
     assert acme["invoices"] == 1 and acme["approved_value"] == 300.0 and acme["open_pos"] == 1 and acme["po_remaining"] == 700.0
@@ -181,8 +181,8 @@ def test_search_treats_underscore_and_percent_literally(client):
 
 
 def test_blocked_approval_names_the_blocking_rule(client):
-    pending = submit(client, pdf(invoice_text(number="LOOK-2", po="")))
+    pending = submit(client, pdf(invoice_text(number="LOOK-2", po="", subtotal="800.00")))
     assert submit(client, pdf(invoice_text(number="LOOK-1")))["status"] == "APPROVED"
-    blocked = resolve(client, pending["run_id"], "APPROVED", "PO-1", {"po_number": "PO-1"})
+    blocked = resolve(client, pending["run_id"], "APPROVED", "PO-1", {"po_number": "PO-1", "subtotal": 820.0})
     assert blocked.status_code == 409
     assert "remaining PO" in blocked.json["error"] and "Possible duplicate" not in blocked.json["error"]

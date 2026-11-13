@@ -7,7 +7,8 @@ import re
 from asa_invoice_processor import normalize_identity, parse_date
 
 SOFT = {"required_fields", "ocr_field_evidence", "invoice_date_missing", "invoice_date_future",
-        "buyer_gstin", "seller_gstin", "gst_tax_type", "gst_split_rate"}
+        "buyer_gstin", "seller_gstin", "gst_tax_type", "gst_split_rate",
+        "po_match", "po_balance_available", "vendor_master"}
 
 
 def small_difference(base):

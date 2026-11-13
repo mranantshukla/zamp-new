@@ -557,7 +557,7 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
     check("required_fields", not required, "Missing: " + ", ".join(required) if required else "All required fields present", "review")
     if not inv.get("date"):
         check("invoice_date_missing", False, "Invoice date is missing; retained as a records issue", "advisory", "ADVISORY")
-    if "ocr" in method:
+    if ("ocr" in method or method == "ai_vision"):
         weak = [field for field in sufficient_ocr_evidence(inv, policy) if field != "date"]
         check("ocr_field_evidence", not weak,
               "Critical OCR fields lack required source evidence: " + ", ".join(weak) if weak else
@@ -593,16 +593,16 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
     if po:
         vendor_ok = bool(inv.get("vendor")) and normalize_identity(inv["vendor"]) == normalize_identity(po["vendor"])
         check("vendor_match", vendor_ok, f"Invoice={inv.get('vendor')}; PO={po['vendor']}",
-              "review" if not matches or ("ocr" in method and not inv.get("field_metadata", {}).get("vendor", {}).get("evidence")) else "confirmed")
+              "review" if not matches or (("ocr" in method or method == "ai_vision") and not inv.get("field_metadata", {}).get("vendor", {}).get("evidence")) else "confirmed")
     seller = inv.get("gstin")
     buyer = inv.get("details", {}).get("buyer_gstin")
     if seller:
-        check("seller_gstin", valid_gstin(seller), f"Seller GSTIN {seller} checksum/structure {'valid' if valid_gstin(seller) else 'invalid'}", "review" if "ocr" in method else "confirmed")
+        check("seller_gstin", valid_gstin(seller), f"Seller GSTIN {seller} checksum/structure {'valid' if valid_gstin(seller) else 'invalid'}", "review" if ("ocr" in method or method == "ai_vision") else "confirmed")
     if buyer:
         check("buyer_gstin", valid_gstin(buyer), f"Buyer GSTIN {buyer} checksum/structure {'valid' if valid_gstin(buyer) else 'invalid'}", "review")
     expected_gstins = {str(m.get("gstin") or "").upper() for m in matches if m.get("gstin")}
     if expected_gstins:
-        check("vendor_gstin_match", seller in expected_gstins, f"Seller GSTIN {seller or 'missing'}; vendor master {', '.join(sorted(expected_gstins))}", "review" if not seller or "ocr" in method else "confirmed")
+        check("vendor_gstin_match", seller in expected_gstins, f"Seller GSTIN {seller or 'missing'}; vendor master {', '.join(sorted(expected_gstins))}", "review" if not seller or ("ocr" in method or method == "ai_vision") else "confirmed")
     if seller and buyer:
         check("seller_buyer_distinct", seller != buyer, "Seller and buyer GSTIN must be distinct", "review")
     key = (normalize_identity(inv.get("vendor")), normalize_identity(inv.get("invoice_number")))
@@ -640,26 +640,26 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
         allowed = remaining + po["po_amount"] * policy.po_tolerance_pct
         within = inv["total"] > 0 and inv["total"] <= allowed + 0.01
         check("po_remaining", within, f"Invoice={inv['total']:.2f}; remaining PO={remaining:.2f}; prior approvals={prior:.2f}; tolerance={policy.po_tolerance_pct:.1%}",
-              "review" if "ocr" in method and not within else "confirmed")
+              "review" if ("ocr" in method or method == "ai_vision") and not within else "confirmed")
         if not within: po_status = "BLOCKED"
     if inv.get("subtotal") is not None and inv.get("total") is not None and inv.get("tax") is not None:
         expected = inv["subtotal"] - (inv.get("discount") or 0) + inv["tax"] + (inv.get("details", {}).get("shipping_amount") or 0) + (inv.get("details", {}).get("rounded_off") or 0)
         math_ok = abs(expected - inv["total"]) <= 0.01
-        check("invoice_math", math_ok, f"Computed={expected:.2f}; stated={inv['total']:.2f}", "review" if "ocr" in method else "confirmed")
+        check("invoice_math", math_ok, f"Computed={expected:.2f}; stated={inv['total']:.2f}", "review" if ("ocr" in method or method == "ai_vision") else "confirmed")
     components = inv.get("details", {}).get("tax_breakdown") or {}
     amounts = [item.get("amount") for item in components.values()]
     if inv.get("tax") is not None and amounts and all(amount is not None for amount in amounts):
         component_total = sum(amounts)
         check("gst_components", abs(component_total - inv["tax"]) <= 0.01,
               f"GST components={component_total:.2f}; stated tax={inv['tax']:.2f}",
-              "review" if "ocr" in method else "confirmed")
+              "review" if ("ocr" in method or method == "ai_vision") else "confirmed")
     if "IGST" in components and ("CGST" in components or "SGST" in components):
         check("gst_tax_type", False, "Both IGST and CGST/SGST appear on the bill; verify tax treatment", "review")
     if "CGST" in components and "SGST" in components:
         cgst_rate, sgst_rate = components["CGST"].get("rate"), components["SGST"].get("rate")
         if cgst_rate is not None and sgst_rate is not None:
             check("gst_split_rate", abs(cgst_rate - sgst_rate) <= 0.001,
-                  f"CGST rate={cgst_rate}%; SGST rate={sgst_rate}%", "review" if "ocr" in method else "confirmed")
+                  f"CGST rate={cgst_rate}%; SGST rate={sgst_rate}%", "review" if ("ocr" in method or method == "ai_vision") else "confirmed")
     financial_names = ("po_remaining", "invoice_math", "gst_components", "gst_tax_type", "gst_split_rate")
     financial_checks = [item for item in checks if item["check"] in financial_names]
     if inv.get("subtotal") is None or inv.get("tax") is None or inv.get("total") is None:

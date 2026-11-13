@@ -161,7 +161,7 @@ def test_login_session_has_persistent_cookie(client, monkeypatch):
 @pytest.mark.parametrize("change,expected", [
     ({"number":""}, "APPROVED"), ({"total":""}, "PENDING_REVIEW"),
     ({"date":"31/02/2026"}, "APPROVED"), ({"vendor":"Wrong Vendor"}, "PENDING_REVIEW"),
-    ({"po":""}, "PENDING_REVIEW"), ({"po":"UNKNOWN-44"}, "PENDING_REVIEW"),
+    ({"po":""}, "APPROVED"), ({"po":"UNKNOWN-44"}, "APPROVED"),
     ({"total":"1001.00"}, "PENDING_REVIEW"), ({"subtotal":"800.00"}, "PENDING_REVIEW"),
     ({"heading":"DELIVERY CHALLAN"}, "PENDING_REVIEW"),
 ])
@@ -221,7 +221,7 @@ def test_financial_components_and_partial_po(client):
 
 
 def test_manual_review_preserves_automated_decision(client):
-    row=submit(client,pdf(invoice_text(po="")))
+    row=submit(client,pdf(invoice_text(po="", subtotal="800.00")))
     rid=row["run_id"]
     with client.session_transaction() as sess: csrf = sess["csrf"]
     response=client.post("/api/runs/"+rid+"/reviews",json={"reviewer":"Test Reviewer",
@@ -242,7 +242,7 @@ def test_ai_evidence_review_is_recorded_without_overriding_decision(client):
     assert review["decision_preserved"] == "APPROVED"
     assert any(stage["stage"] == "AI evidence review" and stage["status"] == "COMPLETED"
                for stage in approved["stages"])
-    pending = submit(client, pdf(invoice_text(number="AI-NEEDS-REVIEW", po="")))
+    pending = submit(client, pdf(invoice_text(number="AI-NEEDS-REVIEW", po="", subtotal="800.00")))
     assert pending["status"] == "PENDING_REVIEW"
     assert pending["ai_review"]["recommendation"] == "ESCALATE_TO_HUMAN"
 
@@ -309,7 +309,7 @@ def test_classification_and_reference_separation():
 
 
 def test_pending_resubmission_is_not_business_duplicate(client):
-    raw=pdf(invoice_text(number="PENDING-1",po=""))
+    raw=pdf(invoice_text(number="PENDING-1",po="",subtotal="800.00"))
     assert submit(client,raw)["status"] == "PENDING_REVIEW"
     second=submit(client,raw)
     assert second["status"] == "PENDING_REVIEW"
@@ -355,7 +355,7 @@ def test_missing_financial_data_is_blocked(client):
 
 
 def test_issue_acknowledgement_is_audited_without_approving(client):
-    row = submit(client, pdf(invoice_text(po="")))
+    row = submit(client, pdf(invoice_text(po="", subtotal="800.00")))
     rid = row["run_id"]
     status = row["status"]
     issue = next(c["check"] for c in row["decision"]["checks"] if c["outcome"] != "VERIFIED_PASS")
@@ -427,7 +427,7 @@ def test_ocr_and_ai_start_in_parallel_and_ai_can_win(monkeypatch):
     monkeypatch.setattr(web, "AI_RUNTIME_CONFIG", {"endpoint": "test", "model": "test", "api_key": "test"})
     monkeypatch.setattr(web, "read_document_cached", slow_ocr)
     monkeypatch.setattr(web, "read_document_with_ai", ai_read)
-    text, method, pages, cached, vision = web.read_parallel(b"image", ".jpg")
+    text, method, pages, cached, vision = web.read_parallel(b"image", ".jpg", use_ocr=True)
     assert method == "ai_vision" and vision["status"] == "COMPLETED"
 
 
@@ -452,3 +452,11 @@ def test_isolated_ocr_timeout_is_reported(client, monkeypatch):
     monkeypatch.setattr(subprocess, "run", timeout)
     with pytest.raises(RuntimeError, match="deadline"):
         web.read_document_cached(b"unique-timeout-test", ".jpg")
+
+
+def test_ai_default_does_not_start_ocr(monkeypatch):
+    monkeypatch.setattr(web, "AI_RUNTIME_CONFIG", {"endpoint": "test", "model": "test", "api_key": "test"})
+    def no_ocr(*args): raise AssertionError("OCR must be opt-in")
+    monkeypatch.setattr(web, "read_document_cached", no_ocr)
+    monkeypatch.setattr(web, "read_document_with_ai", lambda *a: {"status": "COMPLETED", "text": invoice_text(), "pages": 1})
+    assert web.read_parallel(b"image", ".jpg")[1] == "ai_vision"

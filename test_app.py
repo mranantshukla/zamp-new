@@ -160,7 +160,7 @@ def test_login_session_has_persistent_cookie(client, monkeypatch):
 
 @pytest.mark.parametrize("change,expected", [
     ({"number":""}, "PENDING_REVIEW"), ({"total":""}, "PENDING_REVIEW"),
-    ({"date":"31/02/2026"}, "PENDING_REVIEW"), ({"vendor":"Wrong Vendor"}, "PENDING_REVIEW"),
+    ({"date":"31/02/2026"}, "APPROVED"), ({"vendor":"Wrong Vendor"}, "PENDING_REVIEW"),
     ({"po":""}, "PENDING_REVIEW"), ({"po":"UNKNOWN-44"}, "PENDING_REVIEW"),
     ({"total":"1001.00"}, "REJECTED"), ({"subtotal":"800.00"}, "REJECTED"),
     ({"heading":"DELIVERY CHALLAN"}, "PENDING_REVIEW"),
@@ -352,3 +352,20 @@ def test_missing_financial_data_is_blocked(client):
     finance=row["decision"]["financial_validation"]
     assert finance["status"] == "BLOCKED_MISSING_DATA"
     assert any(c["financial_outcome"] == "BLOCKED" for c in finance["checks"])
+
+
+def test_issue_acknowledgement_is_audited_without_approving(client):
+    row = submit(client, pdf(invoice_text(po="")))
+    rid = row["run_id"]
+    status = row["status"]
+    issue = next(c["check"] for c in row["decision"]["checks"] if c["outcome"] != "VERIFIED_PASS")
+    with client.session_transaction() as sess: csrf = sess["csrf"]
+    headers = {"X-CSRF-Token": csrf}
+    url = f"/api/runs/{rid}/issues/{issue}"
+    assert client.post(url, json={"reviewer": "Tester", "acknowledged": True}, headers=headers).status_code == 200
+    saved = client.get(f"/api/runs/{rid}").json
+    assert saved["status"] == status
+    assert saved["reviews"][-1]["outcome"] == "ISSUE_ACKNOWLEDGED"
+    assert client.post(url, json={"reviewer": "Tester", "acknowledged": False}, headers=headers).status_code == 200
+    assert client.get(f"/api/runs/{rid}").json["reviews"][-1]["outcome"] == "ISSUE_REOPENED"
+    assert client.post(f"/api/runs/{rid}/issues/not-real", json={"reviewer": "Tester", "acknowledged": True}, headers=headers).status_code == 400

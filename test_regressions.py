@@ -419,3 +419,16 @@ def test_payment_change_requires_review_but_future_date_is_advisory(tmp_path):
 def test_freight_line_is_not_counted_twice():
     inv = processor.extract_invoice("Vendor: Acme\nTAX INVOICE\nFreight Charges: 18\nSubtotal: 1000\nTotal Tax: 180\nGrand Total: 1180")
     assert inv["details"]["shipping_amount"] is None
+
+
+def test_records_issues_do_not_hold_safe_invoice(tmp_path):
+    po, history = fixture(tmp_path)
+    inv = invoice()
+    inv["date"] = None
+    inv["details"] = {"buyer_gstin": "INVALID"}
+    result = processor.decide(inv, po, history)
+    assert result.status == "APPROVED"
+    assert {c["check"] for c in result.checks if c["outcome"] == "ADVISORY"} == {"invoice_date_missing", "buyer_gstin"}
+    # Removing the reference disables reliable duplicate protection: still a real risk.
+    inv["invoice_number"] = None
+    assert processor.decide(inv, po, history).status == "PENDING_REVIEW"

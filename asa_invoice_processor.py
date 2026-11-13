@@ -533,10 +533,12 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
         checks.append({"check": name, "passed": passed, "detail": detail, "category": category, "outcome": state})
         if state != PASS:
             reasons.append(detail)
-    required = [k for k in ("invoice_number", "po_number", "vendor", "date", "total") if not inv.get(k)]
+    required = [k for k in ("invoice_number", "po_number", "vendor", "total") if not inv.get(k)]
     check("required_fields", not required, "Missing: " + ", ".join(required) if required else "All required fields present", "review")
+    if not inv.get("date"):
+        check("invoice_date_missing", False, "Invoice date is missing; retained as a records issue", "advisory", "ADVISORY")
     if "ocr" in method:
-        weak = sufficient_ocr_evidence(inv, policy)
+        weak = [field for field in sufficient_ocr_evidence(inv, policy) if field != "date"]
         check("ocr_field_evidence", not weak,
               "Critical OCR fields lack required source evidence: " + ", ".join(weak) if weak else
               "Critical OCR fields have direct label evidence; this is not a calibrated probability", "review")
@@ -652,7 +654,7 @@ def decide(inv, po_path, history_path=None, *, method="text", vendor_master_path
     if re.search(r"\b(?:new\s+bank\s+(?:account|details)|bank\s+(?:account|details)\s+(?:has|have)\s+changed|change\s+of\s+bank\s+(?:account|details))\b", inv.get("raw_text", ""), re.I):
         check("payment_change", False, "Payment instructions announce changed bank details; verify using the supplier contact already on file", "review")
     for item in checks:
-        if item["check"] == "invoice_date_future" and not item["passed"]:
+        if item["check"] in ("invoice_date_future", "buyer_gstin") and not item["passed"]:
             item["outcome"] = "ADVISORY"
             item["category"] = "advisory"
     status = resolve(checks)

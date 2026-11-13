@@ -445,6 +445,21 @@ def document_api(rid):
 
 CORRECTABLE_FIELDS = {"invoice_number", "po_number", "vendor", "gstin", "date", "total", "subtotal", "discount", "tax"}
 
+@app.post("/api/runs/<rid>/issues/<issue>")
+def acknowledge_issue_api(rid, issue):
+    data = request.get_json(silent=True) or {}
+    reviewer = str(data.get("reviewer") or "").strip()[:80]
+    acknowledged = data.get("acknowledged")
+    if not reviewer or not isinstance(acknowledged, bool):
+        return jsonify(error="Reviewer and acknowledgement state are required"), 400
+    row = storage.get_run(rid)
+    if not row: abort(404)
+    checks = (row.get("decision") or {}).get("checks") or []
+    if not any(c.get("check") == issue and c.get("outcome") != "VERIFIED_PASS" for c in checks):
+        return jsonify(error="Unknown issue"), 400
+    storage.record_review(rid, reviewer, "ISSUE_ACKNOWLEDGED" if acknowledged else "ISSUE_REOPENED", issue, {})
+    return jsonify(saved=True, automated_decision=row["status"])
+
 @app.post("/api/runs/<rid>/reviews")
 def review_api(rid):
     data = request.get_json(silent=True) or {}

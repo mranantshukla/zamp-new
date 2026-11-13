@@ -557,6 +557,12 @@
           <h1>${esc(title(r))}</h1><p class="sub">Invoice ${dash(r.invoice_number)} · PO ${dash(r.po_number)} · dated ${dash(inv.date)} · read from ${esc(METHOD[r.method] || r.method || '—')} · received ${esc(ago(r.time))}</p></div>
         <div class="inv-amount"><b>${money(r.total)}</b><small>${inv.tax != null ? `includes ${money(inv.tax)} tax` : 'total'}</small></div></div>`;
 
+      const checks = r.decision?.checks || [];
+      const acknowledgements = {};
+      for (const review of r.reviews || []) {
+        if (['ISSUE_ACKNOWLEDGED', 'ISSUE_REOPENED'].includes(review.outcome)) acknowledgements[review.note] = review.outcome === 'ISSUE_ACKNOWLEDGED';
+      }
+      const issueTick = (c) => `<label class="small"><input type="checkbox" data-issue="${esc(c.check)}" ${acknowledgements[c.check] ? 'checked' : ''}> Acknowledged</label>`;
       let verdict;
       if (r.status === 'RUNNING') {
         const current = m.stages.find((n) => latest[n]?.status === 'RUNNING') || 'Starting';
@@ -571,17 +577,16 @@
           ${okd ? '' : '<div class="row" style="margin-top:6px"><button class="btn btn-sm" data-email>Write to supplier</button></div>'}</div>`;
       } else if (r.status === 'APPROVED') {
         const advisory = checks.filter((c) => c.outcome === 'ADVISORY');
-        verdict = `<div class="verdict ok"><h3>Cleared automatically</h3><p>Supplier, purchase order, arithmetic and duplicate checks all passed.</p>${advisory.length ? `<p>Reported for your records; no action required:</p><ul>${advisory.map((c) => `<li>${esc(c.detail)}</li>`).join('')}</ul>` : ''}</div>`;
+        verdict = `<div class="verdict ok"><h3>Cleared automatically</h3><p>Supplier, purchase order, arithmetic and duplicate checks all passed.</p>${advisory.length ? `<p>Reported for your records; no action required:</p><ul>${advisory.map((c) => `<li>${esc(c.detail)} ${issueTick(c)}</li>`).join('')}</ul>` : ''}</div>`;
       } else if (r.status === 'REJECTED') {
-        verdict = `<div class="verdict bad"><h3>Held back — not payable as sent</h3><ul class="reasons" style="margin-top:4px">${reasons.map((x) => `<li>${esc(human(x))}</li>`).join('')}</ul><div class="row" style="margin-top:8px"><button class="btn btn-sm" data-email>Write to supplier</button></div></div>`;
+        verdict = `<div class="verdict bad"><h3>Held back — not payable as sent</h3><ul class="reasons" style="margin-top:4px">${reasons.map((x) => `<li>${esc(human(x))}${checks.find((c) => c.detail === x) ? issueTick(checks.find((c) => c.detail === x)) : ''}</li>`).join('')}</ul><div class="row" style="margin-top:8px"><button class="btn btn-sm" data-email>Write to supplier</button></div></div>`;
       } else {
-        verdict = `<div class="verdict warn"><h3>Waiting on ${esc(rt?.team || 'AP Specialist')}${due(r) ? ` · ${esc(due(r).text)}` : ''}</h3><ul class="reasons" style="margin-top:4px">${reasons.map((x) => `<li>${esc(human(x))}</li>`).join('') || '<li>Needs a person to confirm</li>'}</ul></div>`;
+        verdict = `<div class="verdict warn"><h3>Waiting on ${esc(rt?.team || 'AP Specialist')}${due(r) ? ` · ${esc(due(r).text)}` : ''}</h3><ul class="reasons" style="margin-top:4px">${reasons.map((x) => `<li>${esc(human(x))}${checks.find((c) => c.detail === x) ? issueTick(checks.find((c) => c.detail === x)) : ''}</li>`).join('') || '<li>Needs a person to confirm</li>'}</ul></div>`;
       }
-      const checks = r.decision?.checks || [];
       const issues = checks.filter((c) => c.outcome !== 'VERIFIED_PASS');
       const passed = checks.filter((c) => c.outcome === 'VERIFIED_PASS');
       const checkRow = (c) => { const t = c.outcome === 'VERIFIED_PASS' ? 'ok' : c.outcome === 'CONFIRMED_VIOLATION' ? 'bad' : 'warn';
-        return `<div class="check"><span class="g ${t}">${t === 'ok' ? '✓' : t === 'bad' ? '×' : '!'}</span><div><b>${esc(m.checks[c.check] || c.check)}</b><small>${esc(human(c.detail))}</small></div></div>`; };
+        return `<div class="check"><span class="g ${t}">${t === 'ok' ? '✓' : t === 'bad' ? '×' : '!'}</span><div><b>${esc(m.checks[c.check] || c.check)}</b><small>${esc(human(c.detail))}</small>${c.outcome !== 'VERIFIED_PASS' ? issueTick(c) : ''}</div></div>`; };
       const fm = inv.field_metadata || {};
       const t0 = r.stages?.[0]?.at ? new Date(r.stages[0].at).getTime() : 0;
       const outcomeWord = { APPROVED_BY_REVIEWER: 'Approved', REJECTED_BY_REVIEWER: 'Rejected', VERIFIED: 'Note', NEEDS_CORRECTION: 'Correction' };
@@ -611,6 +616,17 @@
       restore();
       $$('[data-tab]').forEach((b) => b.addEventListener('click', () => { if (editing) pending = { ...pending, ...corrections() }; tab = b.dataset.tab; draw(run); }));
       $$('[data-email]').forEach((b) => b.addEventListener('click', () => { $('#emailbody').value = supplierNote(run); $('#emaildialog').showModal(); }));
+      $$('[data-issue]').forEach((box) => box.addEventListener('change', async () => {
+        const acknowledged = box.checked;
+        box.disabled = true;
+        try {
+          const reviewer = await ensureName();
+          if (!reviewer) { box.checked = !acknowledged; return; }
+          await api(`/api/runs/${rid}/issues/${encodeURIComponent(box.dataset.issue)}`, { method: 'POST', json: { reviewer, acknowledged } });
+          run = await api(`/api/runs/${rid}`); draw(run);
+        } catch (err) { box.checked = !acknowledged; toast(err.message, { tone: 'bad' }); }
+        finally { box.disabled = false; }
+      }));
       $$('[data-act]').forEach((b) => b.addEventListener('click', () => act(b.dataset.act)));
     };
 

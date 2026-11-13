@@ -67,7 +67,7 @@ Optional, idempotent legacy JSON import: set `DATABASE_URL`, then run `python mi
 
 ## Known limits
 
-The heuristic extractor remains weak on real bills: the current 22-image AjitRawat benchmark is **25/90 exact comparable fields (27.8%)**. OCR evidence grades are structural, not calibrated confidence. GST checks do not establish tax-law compliance. Interrupted runs are marked `FAILED` after a worker restart. Schema version 1 is initialized additively; future changes need a migration framework. Render free web services spin down and free Postgres expires after 30 days.
+The heuristic extractor remains weak on real bills: the current 22-image AjitRawat benchmark is **30/90 exact comparable fields (33.3%)**. OCR evidence grades are structural, not calibrated confidence. GST checks do not establish tax-law compliance. Interrupted runs are marked `FAILED` after a worker restart. Schema version 1 is initialized additively; future changes need a migration framework. Render free web services spin down and free Postgres expires after 30 days.
 
 First-time OCR can still be slow on CPU-limited hosting. On one local sample (`invoice_07.jpg`), recognition batch size 1 took 3.3–3.4 seconds and batch size 6 took 5.8–5.9 seconds, so batch size 1 remains the default. These local timings do not predict Render latency. Exact-document cache hits avoid OCR on subsequent runs; cold documents still require OCR.
 

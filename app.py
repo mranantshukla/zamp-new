@@ -509,8 +509,8 @@ def export_runs_xlsx():
 
 @app.post("/api/history/clear")
 def clear_history():
-    count = storage.archive_history()
-    log.info("archived %s completed runs from visible history", count)
+    count = storage.archive_non_dataset_history()
+    log.info("archived %s non-dataset runs from visible history", count)
     return jsonify(archived=count, note="Audit, duplicate and PO balance records retained")
 
 @app.get("/api/ai/config")

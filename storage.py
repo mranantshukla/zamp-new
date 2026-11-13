@@ -252,6 +252,13 @@ def archive_history():
         return conn.execute(update(runs).where(runs.c.status != "RUNNING", runs.c.archived == 0)
                             .values(archived=1)).rowcount
 
+def archive_non_dataset_history():
+    """Hide completed trial uploads while keeping public dataset runs visible."""
+    with engine.begin() as conn:
+        return conn.execute(update(runs).where(runs.c.status != "RUNNING",
+                                               runs.c.event_type != "dataset_evaluation",
+                                               runs.c.archived == 0).values(archived=1)).rowcount
+
 def run_status(rid):
     with engine.connect() as conn:
         return conn.execute(select(runs.c.status).where(runs.c.id == rid)).scalar()

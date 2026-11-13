@@ -578,7 +578,7 @@
     let timer; $('#q').addEventListener('input', (e) => { clearTimeout(timer); timer = setTimeout(() => { state.q = e.target.value.trim(); sync(); load(true); }, 250); });
     $('#date').addEventListener('change', (e) => { state.date = e.target.value; sync(); load(true); });
     $('#archive').addEventListener('click', async () => {
-      if (!confirm('Archive finished invoices? They leave this list, but duplicate protection and PO balances still count them.')) return;
+      if (!confirm('Keep only public dataset runs in this list? Other finished runs leave the visible log, while audit records, duplicate protection and PO balances remain.')) return;
       try { const r = await api('/api/history/clear', { method: 'POST' }); toast(`${plural(r.archived, 'invoice')} archived`); load(true); }
       catch (err) { toast(err.message, { tone: 'bad' }); }
     });

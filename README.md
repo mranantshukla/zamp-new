@@ -1,4 +1,8 @@
-# ASA Invoice Intelligence
+# zamp infinity
+
+*The potential is almost infinite.*
+
+Accounts payable invoice intelligence (formerly ASA Invoice Intelligence).
 
 An accounts payable case study that reads PDF or image bills, extracts invoice fields, checks vendors and purchase orders, reconciles amounts, detects duplicates, and records `APPROVED`, `REJECTED`, or `PENDING_REVIEW`. Document approval does not authorise payment.
 

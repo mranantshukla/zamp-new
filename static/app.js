@@ -1,4 +1,4 @@
-/* zamp · Payables desk — single-page app on the Flask JSON API. No dependencies. */
+/* zamp infinity — single-page app on the Flask JSON API. No dependencies. */
 (() => {
   'use strict';
   const APP = window.APP || {};
@@ -64,7 +64,9 @@
 
   /* ---------- reviewer, theme, sidebar ---------- */
   const store = { get(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} } };
-  const reviewerName = () => store.get('zamp-reviewer') || '';
+  // Default reviewer until someone sets their own name from the sidebar.
+  const DEFAULT_REVIEWER = 'Anant';
+  const reviewerName = () => store.get('zamp-reviewer') || DEFAULT_REVIEWER;
   function paintName() {
     const n = reviewerName();
     $('#whoaminame').textContent = n || 'Set your name';

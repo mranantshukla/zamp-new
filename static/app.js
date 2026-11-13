@@ -240,7 +240,7 @@
     const segments = [...big.map((x, i) => ({ label: x.stage, seconds: x.seconds, color: palette[i] })), ...(rest ? [{ label: `${steps.length - 5} other steps`, seconds: rest, color: palette[7] }] : [])];
 
     view.innerHTML = `
-      <p class="motto"><svg viewBox="0 0 48 24" aria-hidden="true"><path d="M24 12C28 6 34 4.5 39 7.5C44 10.5 43.5 17.5 38 19.5C32.5 21.5 28 17 24 12C20 7 15.5 2.5 10 4.5C4.5 6.5 4 13.5 9 16.5C14 19.5 20 18 24 12Z" stroke="url(#infgrad)" stroke-width="3.6"/></svg><span>the potential is always infinite</span></p>
+      <p class="motto"><svg viewBox="0 0 48 24" aria-hidden="true"><path d="M24 12C28 6 34 4.5 39 7.5C44 10.5 43.5 17.5 38 19.5C32.5 21.5 28 17 24 12C20 7 15.5 2.5 10 4.5C4.5 6.5 4 13.5 9 16.5C14 19.5 20 18 24 12Z" stroke="url(#infgrad)" stroke-width="3.6"/></svg><span>The potential is always infinite.</span></p>
       <section class="greeting"><div><span class="kicker">${esc(new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' }))}</span>
         <h1>${hello}${name ? `, ${esc(name)}` : ''}.</h1><p>${brief}</p></div>
         <div class="actions">${queue.length ? `<a class="btn btn-primary" href="#/review">Work the exceptions</a><a class="btn" href="#/upload">Bring in invoices</a>` : `<a class="btn btn-primary" href="#/upload">Bring in invoices</a>`}</div></section>

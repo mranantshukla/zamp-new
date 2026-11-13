@@ -13,7 +13,10 @@ from sqlalchemy import (create_engine, MetaData, Table, Column, String, DateTime
                         inspect, or_, and_)
 
 ROOT = Path(__file__).parent
-url = os.getenv("DATABASE_URL") or "sqlite:///" + str(ROOT / "asa_local.db").replace("\\", "/")
+database_url = os.getenv("DATABASE_URL")
+if os.getenv("RENDER") == "true" and not database_url:
+    raise RuntimeError("DATABASE_URL is required on Render to retain invoices across restarts and deploys")
+url = database_url or "sqlite:///" + str(ROOT / "asa_local.db").replace("\\", "/")
 if url.startswith("postgres://"):
     url = "postgresql://" + url[len("postgres://"):]
 if url.startswith("postgresql://"):

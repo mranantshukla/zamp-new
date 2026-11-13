@@ -80,7 +80,7 @@ Optional, idempotent legacy JSON import: set `DATABASE_URL`, then run `python mi
 
 ## Render
 
-`render.yaml` defines a free Python web service, `/healthz`, generated secret, and demo login variables. It uses local SQLite, whose data is ephemeral on Render's free web service. Connect this repository through Render Blueprint, supply `DEMO_USERNAME` and `DEMO_PASSWORD`, and test the resulting URL. Set `DATABASE_URL` separately for persistent PostgreSQL storage. See `DEPLOYMENT.md`.
+`render.yaml` defines a free Python web service, `/healthz`, generated secret, demo login variables, and a `DATABASE_URL` placeholder. Local development defaults to SQLite. On Render, the app requires PostgreSQL through `DATABASE_URL` because the free web service loses local files when it sleeps or redeploys. Connect this repository through Render Blueprint, supply `DEMO_USERNAME`, `DEMO_PASSWORD`, and `DATABASE_URL` in Render, and test the resulting URL. See `DEPLOYMENT.md`.
 
 ## Workspace
 

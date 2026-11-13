@@ -370,7 +370,8 @@ def index():
     document.getElementById('testaiconfig').onclick = async () => { const message=document.getElementById('aiconfigmessage'); message.textContent='Testing AI connection…'; const response=await fetch('/api/ai/connection-test',{method:'POST',headers:{'X-CSRF-Token':csrf}}); const data=await response.json(); message.textContent=data.note || data.error || 'AI connection test completed.'; };
     })();</script>"""
     html = html.replace("</head>", "<style>" + ui_overrides + "</style></head>", 1)
-    return html.replace("</body>", ai_ui + "</body>", 1)
+    html = html.replace("</head>", "<meta name='theme-color' content='#090b10'><link rel='stylesheet' href='/static/experience.css'></head>", 1)
+    return html.replace("</body>", ai_ui + "<script src='/static/experience.js' defer></script></body>", 1)
 
 LOGIN_HTML = """<!doctype html><title>Sign in · ASA</title><main style='font:16px Arial;max-width:360px;margin:15vh auto'><h1>Invoice intelligence</h1><p>Sign in to view invoice records.</p><form method=post><input name=username placeholder=Username required><input name=password type=password placeholder=Password required><button>Sign in</button></form><p>{{error}}</p></main>"""
 INDEX_HTML = """<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>ASA Invoice Intelligence</title><style>{{ css }}</style><style>

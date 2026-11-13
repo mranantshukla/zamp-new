@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import (create_engine, MetaData, Table, Column, String, DateTime, Float, Index,
-                        LargeBinary, Integer, Text, ForeignKey, select, insert, update, text, func,
+                        LargeBinary, Integer, Text, ForeignKey, select, insert, update, delete, text, func,
                         inspect, or_, and_)
 
 ROOT = Path(__file__).parent
@@ -69,6 +69,8 @@ INDEXES = (Index("ix_runs_created_at", runs.c.created_at), Index("ix_runs_status
            Index("ix_stages_run_id", stages.c.run_id, stages.c.id), Index("ix_reviews_run_id", reviews.c.run_id),
            Index("ix_runs_route_team", runs.c.route_team))
 SCHEMA_VERSION = 4
+demo_resets = Table("demo_resets", meta, Column("key", String(80), primary_key=True),
+                    Column("at", DateTime(timezone=True), nullable=False))
 
 def now(): return datetime.now(timezone.utc)
 
@@ -134,6 +136,18 @@ def initialize():
             conn.execute(insert(migrations).values(version=target))
         for index in INDEXES:
             index.create(conn, checkfirst=True)
+
+def reset_demo_history_once(key):
+    """Clear run history once for an explicitly named owner-requested demo reset."""
+    with engine.begin() as conn:
+        if conn.execute(select(demo_resets.c.key).where(demo_resets.c.key == key)).first():
+            return False
+        conn.execute(delete(reviews))
+        conn.execute(delete(stages))
+        conn.execute(delete(runs))
+        conn.execute(delete(documents))
+        conn.execute(insert(demo_resets).values(key=key, at=now()))
+        return True
 
 def recover_interrupted():
     """Close runs left active by a terminated single-worker process."""
@@ -250,7 +264,8 @@ def list_runs(limit=300, include_archived=False, *, offset=0, status=None, day=N
 
 def count_runs(include_archived=False, status=None, day=None, open_only=False, team=None):
     with engine.connect() as conn:
-        query = _list_query(include_archived, status, day, None, open_only, team).with_only_columns(func.count()).order_by(None)
+        query = _list_query(include_archived, status, day, None, open_only, team).with_only_columns(
+            func.count(), maintain_column_froms=True).order_by(None)
         return conn.execute(query).scalar() or 0
 
 def archive_history():

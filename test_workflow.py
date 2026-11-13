@@ -168,7 +168,7 @@ def test_v2_database_upgrades_to_v3_keeping_archive_flag(tmp_path, monkeypatch):
     with engine.connect() as conn:
         assert tuple(conn.exec_driver_sql("SELECT route_team, flags, archived, resolution FROM processing_runs").one()) == \
             ("Procurement", "po_match", 1, None)
-        assert conn.exec_driver_sql("SELECT max(version) FROM schema_migrations").scalar() == 3
+        assert conn.exec_driver_sql("SELECT max(version) FROM schema_migrations").scalar() == storage.SCHEMA_VERSION
     engine.dispose()
 
 

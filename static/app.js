@@ -328,8 +328,8 @@
       </section>
 
       <div class="overview-section-title"><div><span class="kicker">At a glance</span><h2>Current workload</h2></div><span class="muted small">${scope === 'all' && s.dataset_documents ? `${s.dataset_documents} public dataset runs included` : 'Live workspace totals'}</span></div>
-      <div class="overview-kpis"><a href="#/invoices"><small>Documents received</small><b>${s.documents}</b><small>${im.non_invoices} filed for reference</small></a><a href="#/invoices"><small>Approved</small><b class="ok">${im.approved}</b><small>${pct(s.touchless_rate)} handled automatically</small></a><a href="#/review"><small>Needs review</small><b class="warn">${im.pending}</b><small>Material issues for a person</small></a><a href="#/invoices"><small>Typical processing</small><b>${secs(s.processing_seconds.median)}</b><small>Median · visible records</small></a></div>
-      <section class="panel"><div class="panel-head"><div><h2>Document flow</h2><p>${s.dataset_documents ? `${s.dataset_documents} dataset runs included · excluded from the payment ledger` : "Current business invoices"}</p></div><a class="btn btn-sm btn-ghost" href="#/invoices">All invoices</a></div>
+      <div class="overview-kpis"><a href="#/invoices"><small>Invoice value checked</small><b>${moneyShort(im.value)}</b><small>Across ${plural(im.invoices, 'invoice')}</small></a><a href="#/invoices"><small>Approved</small><b class="ok">${im.approved}</b><small>${pct(s.touchless_rate)} handled automatically</small></a><a href="#/review"><small>Needs review</small><b class="warn">${im.pending}</b><small>Material issues for a person</small></a><a href="#/invoices"><small>Team time saved*</small><b>${s.time_saved_minutes ? (s.time_saved_minutes / 60).toFixed(1) : '0'} h</b><small>* ${s.manual_minutes_per_invoice} min per hands-free invoice</small></a></div>
+      <section class="panel"><div class="panel-head"><div><h2>Document flow</h2><p>${plural(s.documents, 'document')} received · ${secs(s.processing_seconds.median)} typical processing${s.dataset_documents ? ' · public dataset' : ''}</p></div><a class="btn btn-sm btn-ghost" href="#/invoices">All invoices</a></div>
         <div class="flow">
           <div class="flow-step"><small>Received</small><b>${s.documents}</b><small>documents</small></div>
           <div class="flow-step"><small>Read</small><b>${s.documents - failed - (s.by_status.RUNNING?.count || 0)}</b><small>${s.by_status.RUNNING?.count ? `${s.by_status.RUNNING.count} still processing` : failed ? `${failed} could not be read` : 'completed reads'}</small></div>
@@ -352,12 +352,11 @@
               <div class="ring-label"><b>${pct(s.touchless_rate)}</b><small>hands-free</small></div></div>
             <div><h2 style="font-size:15.5px">Automation</h2><p class="muted small" style="margin:4px 0 10px">Share of decided invoices approved with nobody touching them.</p>
               <div class="keys" style="display:grid;gap:6px">${outs.slice(0, 4).map((o) => `<span class="key"><i class="${o.k}"></i>${o.label} <b>${o.value}</b></span>`).join('')}</div></div></div></section>
-          <section class="panel panel-pad"><h2 style="font-size:15.5px;margin-bottom:14px">Ledger</h2><div class="ledger">
-            <div><span>Invoice value handled</span><b>${moneyShort(im.value)}</b></div>
+          <section class="panel panel-pad"><h2 style="font-size:15.5px;margin-bottom:14px">Decision details</h2><div class="ledger">
+            <div><span>Invoices checked</span><b>${im.invoices}</b></div>
             <div><span>Value held back</span><b>${moneyShort(s.money_stopped)}</b></div>
-            <div><span>Hours returned to the team*</span><b>${s.time_saved_minutes ? (s.time_saved_minutes / 60).toFixed(1) : '0'}</b></div>
-            <div><span>Typical time per document</span><b>${secs(s.processing_seconds.median)}</b></div></div>
-            <p class="faint small" style="margin-top:12px">* assumes ${s.manual_minutes_per_invoice} minutes of manual work per hands-free invoice.</p></section>
+            <div><span>Filed outside AP</span><b>${im.non_invoices}</b></div>
+            <div><span>Typical processing</span><b>${secs(s.processing_seconds.median)}</b></div></div></section>
         </div>
       </div>
 

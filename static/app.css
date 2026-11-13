@@ -464,3 +464,4 @@ dialog::backdrop { background: rgb(13 13 13 / .32); }
 @media(max-width:640px){.dashboard-lead{gap:10px}.dashboard-hero{padding:22px;min-height:unset}.dashboard-hero .actions{flex-wrap:wrap;margin-top:16px}.dashboard-hero .actions .btn{flex:1}.attention-panel{padding:18px}.attention-copy small{white-space:normal;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical}.attention-list>a{grid-template-columns:24px minmax(0,1fr) auto}}
 
 @media(min-width:900px) and (max-width:980px){.inv-grid{grid-template-columns:minmax(0,1fr) minmax(0,1.1fr)}.doc{position:sticky;top:80px}.doc img,.doc iframe{height:66vh;object-fit:contain}}
+.overview-kpis b{font-size:clamp(24px,2.4vw,34px);overflow-wrap:anywhere}.overview-kpis a{min-width:0}.overview-kpis a small:last-child{display:block;line-height:1.35}

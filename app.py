@@ -50,6 +50,7 @@ if os.getenv("RENDER"):
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 storage.initialize()
 storage.recover_interrupted()
+RESET_DEMO_HISTORY = storage.reset_demo_history_once("2026-11-13-20-invoice-video") if os.getenv("RENDER") else False
 
 # OCR inference is already serialized by a process-wide lock, so extra threads
 # only add memory pressure. A bounded pool queues batch uploads instead of
@@ -983,6 +984,27 @@ LOGIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta
   document.querySelector('input[name="username"]').value = {{ demo_username|tojson }};
   document.querySelector('input[name="password"]').focus();
 });</script>{% endif %}</body></html>"""
+
+def seed_demo_invoices():
+    """Run the 20 invoice candidates once after the owner's history reset."""
+    rows = dataset_rows()
+    if len(rows) < 22:
+        log.error("Demo seed skipped: expected 22 cached dataset rows, found %s", len(rows))
+        return
+    for index in range(22):
+        if index in (6, 11):  # delivery challan and purchase order
+            continue
+        raw, error = dataset_image_bytes(index, rows[index]["row"])
+        if not raw:
+            log.error("Demo seed image %02d unavailable: %s", index + 1, error)
+            continue
+        label = json.loads(rows[index]["row"]["ground_truth"]).get("gt_parse", {}).get("header", {})
+        rid = storage.create_run(f"Indian GST invoice {index+1:02d}", "dataset_evaluation", raw, "image/jpeg")
+        executor.submit(process_run, rid, raw, ".jpg", "dataset_evaluation", label, use_ocr=False)
+    log.info("Queued the 20 invoice-candidate dataset images")
+
+if RESET_DEMO_HISTORY and os.getenv("RENDER"):
+    threading.Thread(target=seed_demo_invoices, name="seed-demo-invoices", daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "8766")), threaded=True)

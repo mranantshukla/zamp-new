@@ -409,3 +409,20 @@ def test_ai_vision_sends_page_images_and_reads_json(monkeypatch):
     content = captured[0]["messages"][0]["content"]
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
     assert result["already_paid"] is False
+
+
+def test_ocr_and_ai_start_in_parallel_and_ai_can_win(monkeypatch):
+    import threading
+    ai_started = threading.Event()
+    def slow_ocr(*args):
+        assert ai_started.wait(1), "AI must start before OCR finishes"
+        time.sleep(.1)
+        return "unreadable", "ocr", 1, False
+    def ai_read(*args):
+        ai_started.set()
+        return {"status": "COMPLETED", "text": invoice_text(), "pages": 1, "model": "test"}
+    monkeypatch.setattr(web, "AI_RUNTIME_CONFIG", {"endpoint": "test", "model": "test", "api_key": "test"})
+    monkeypatch.setattr(web, "read_document_cached", slow_ocr)
+    monkeypatch.setattr(web, "read_document_with_ai", ai_read)
+    text, method, pages, cached, vision = web.read_parallel(b"image", ".jpg")
+    assert method == "ai_vision" and vision["status"] == "COMPLETED"

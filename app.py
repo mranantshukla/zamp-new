@@ -13,7 +13,7 @@ import gzip
 import io
 import zipfile
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeout
 from xml.sax.saxutils import escape as xml_escape
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -177,6 +177,52 @@ def read_document_cached(raw, suffix):
     storage.save_ocr(key, result)
     return (*result, False)
 
+ocr_reader_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-reader")
+ai_reader_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ai-reader")
+
+
+def read_parallel(raw, suffix):
+    """Race independent readers for scans; a usable text PDF avoids model cost."""
+    if not all(AI_RUNTIME_CONFIG.get(k) for k in ("endpoint", "model", "api_key")):
+        return (*read_document_cached(raw, suffix), None)
+    if suffix.lower() == ".pdf":
+        import fitz
+        with fitz.open(stream=raw, filetype="pdf") as doc:
+            text_layer = "\n".join(page.get_text() for page in doc)
+        if len(text_layer.strip()) >= 80:
+            return (*read_document_cached(raw, suffix), None)
+    readers = {ocr_reader_pool.submit(read_document_cached, raw, suffix): "ocr",
+               ai_reader_pool.submit(read_document_with_ai, raw, suffix, dict(AI_RUNTIME_CONFIG)): "ai"}
+    best_ocr, best_ai, errors = None, None, []
+    try:
+        for future in as_completed(readers, timeout=65):
+            try:
+                result = future.result()
+                if readers[future] == "ai":
+                    best_ai = result
+                    if result.get("status") != "COMPLETED": continue
+                    text, method, pages, cached = result["text"], "ai_vision", result["pages"], False
+                else:
+                    best_ocr = result
+                    text, method, pages, cached = result
+                fields = extract_invoice(text)
+                usable = fields.get("total") is not None and fields.get("vendor") and fields.get("subtotal") is not None
+                if usable:
+                    return text, method, pages, cached, result if readers[future] == "ai" else None
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+        if best_ai and best_ai.get("status") == "COMPLETED":
+            return best_ai["text"], "ai_vision", best_ai["pages"], False, best_ai
+        if best_ocr: return (*best_ocr, best_ai)
+        raise RuntimeError("Both document readers failed: " + ", ".join(errors))
+    except FutureTimeout:
+        if best_ocr: return (*best_ocr, best_ai)
+        if best_ai and best_ai.get("status") == "COMPLETED": return best_ai["text"], "ai_vision", best_ai["pages"], False, best_ai
+        raise RuntimeError("Document reading deadline exceeded")
+    finally:
+        for future in readers: future.cancel()
+
+
 def process_run(rid, raw, suffix, event_type="upload", label=None):
     started = time.monotonic()
     current = "Document received"
@@ -188,13 +234,13 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         ocr_started = time.monotonic()
         ocr_error = None
         try:
-            text, method, pages, cache_hit = read_document_cached(raw, suffix)
+            text, method, pages, cache_hit, vision = read_parallel(raw, suffix)
         except Exception as exc:
             ocr_error = type(exc).__name__
             text, method, pages, cache_hit = "", "ocr_failed", 0, False
         preliminary = extract_invoice(text)
-        vision = None
-        if ocr_error or preliminary.get("subtotal") is None or not preliminary.get("total") or sum(bool(preliminary.get(k)) for k in ("vendor", "invoice_number", "date", "total")) < 3:
+        vision = None if ocr_error else vision
+        if vision is None and (ocr_error or preliminary.get("subtotal") is None or not preliminary.get("total") or sum(bool(preliminary.get(k)) for k in ("vendor", "invoice_number", "date", "total")) < 3):
             vision = read_document_with_ai(raw, suffix, AI_RUNTIME_CONFIG)
             if vision["status"] == "COMPLETED":
                 text, method, pages = vision["text"], "ai_vision", vision["pages"]
@@ -223,6 +269,8 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         if vision and vision["status"] == "COMPLETED":
             ai_extraction = {"status": "COMPLETED", "source": "original_page_images", "model": vision["model"],
                              "accepted_fields": [k for k in ("vendor", "invoice_number", "date", "total") if invoice.get(k)]}
+        elif vision and vision.get("status") == "UNAVAILABLE":
+            ai_extraction = {**vision, "accepted_fields": []}
         elif routing["status"] != "INVOICE_AP_WORKFLOW":
             ai_extraction = {"status": "SKIPPED", "accepted_fields": [], "reason": routing["reason"]}
         else:

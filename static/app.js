@@ -316,11 +316,16 @@
     const segments = [...big.map((x, i) => ({ label: x.stage, seconds: x.seconds, color: palette[i] })), ...(rest ? [{ label: `${steps.length - 5} other steps`, seconds: rest, color: palette[7] }] : [])];
 
     view.innerHTML = `
-      <div class="overview-toolbar"><span class="kicker">Overview · visible records</span><label>Show <select id="overview-scope"><option value="all" ${scope === 'all' ? 'selected' : ''}>All documents, including dataset</option><option value="business" ${scope === 'business' ? 'selected' : ''}>Business invoices only</option></select></label><button class="btn btn-sm" id="refresh-overview">Refresh</button></div>
-      <p class="motto"><svg viewBox="0 0 48 24" aria-hidden="true"><path d="M24 12C28 6 34 4.5 39 7.5C44 10.5 43.5 17.5 38 19.5C32.5 21.5 28 17 24 12C20 7 15.5 2.5 10 4.5C4.5 6.5 4 13.5 9 16.5C14 19.5 20 18 24 12Z" stroke="url(#infgrad)" stroke-width="3.6"/></svg><span>The potential is always infinite.</span></p>
-      <section class="greeting dashboard-hero"><div><span class="kicker">${esc(new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' }))} · ${scope === 'business' ? 'Business view' : 'All records'}</span>
-        <h1>${hello}${name ? `, ${esc(name)}` : ''}.</h1><p>${brief}</p></div>
-        <div class="actions">${queue.length ? `<a class="btn btn-primary" href="#/review">Review ${queue.length} ${queue.length === 1 ? 'exception' : 'exceptions'}</a><a class="btn" href="#/upload">New invoice</a>` : `<a class="btn btn-primary" href="#/upload">Bring in invoices</a>`}<button class="btn btn-ghost" type="button" data-open-guide>Ask Zamp</button></div></section>
+      <div class="overview-toolbar"><span class="kicker">AP workspace · ${scope === 'business' ? 'business records' : 'all records'}</span><label>Show <select id="overview-scope"><option value="all" ${scope === 'all' ? 'selected' : ''}>All documents, including dataset</option><option value="business" ${scope === 'business' ? 'selected' : ''}>Business invoices only</option></select></label><button class="btn btn-sm" id="refresh-overview">Refresh</button></div>
+      <section class="dashboard-lead">
+        <div class="dashboard-hero"><span class="kicker">${esc(new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' }))} · ${scope === 'business' ? 'Business view' : 'All records'}</span>
+          <h1>${hello}${name ? `, ${esc(name)}` : ''}.</h1><p>${brief}</p>
+          <div class="actions">${queue.length ? `<a class="btn btn-primary" href="#/review">Open review queue</a><a class="btn" href="#/upload">New invoice</a>` : `<a class="btn btn-primary" href="#/upload">Bring in invoices</a>`}<button class="btn btn-ghost" type="button" data-open-guide>Ask Zamp</button></div>
+        </div>
+        <section class="attention-panel"><div class="attention-head"><div><span class="kicker">Work queue</span><h2>${queue.length ? 'Needs your attention' : 'Clear for now'}</h2></div><span class="attention-count ${queue.length ? 'has-work' : ''}">${queue.length}</span></div>
+          ${queue.length ? `<div class="attention-list">${queue.slice(0, 2).map((r) => `<a href="#/review?id=${esc(r.run_id)}"><span class="attention-dot">!</span><span class="attention-copy"><b>${esc(title(r))}</b><small>${esc(human((r.reasons || [])[0] || route(r)?.reason || 'Review needed'))}</small></span>${dueChip(r)}</a>`).join('')}</div><a class="attention-more" href="#/review">See all ${queue.length} exceptions <span>→</span></a>` : `<p class="muted">No invoices are waiting for a decision.</p><a class="attention-more" href="#/upload">Add an invoice <span>→</span></a>`}
+        </section>
+      </section>
 
       <div class="overview-section-title"><div><span class="kicker">At a glance</span><h2>Current workload</h2></div><span class="muted small">${scope === 'all' && s.dataset_documents ? `${s.dataset_documents} public dataset runs included` : 'Live workspace totals'}</span></div>
       <div class="overview-kpis"><a href="#/invoices"><small>Documents received</small><b>${s.documents}</b><small>${im.non_invoices} filed for reference</small></a><a href="#/invoices"><small>Approved</small><b class="ok">${im.approved}</b><small>${pct(s.touchless_rate)} handled automatically</small></a><a href="#/review"><small>Needs review</small><b class="warn">${im.pending}</b><small>Material issues for a person</small></a><a href="#/invoices"><small>Typical processing</small><b>${secs(s.processing_seconds.median)}</b><small>Median · visible records</small></a></div>
@@ -347,9 +352,6 @@
               <div class="ring-label"><b>${pct(s.touchless_rate)}</b><small>hands-free</small></div></div>
             <div><h2 style="font-size:15.5px">Automation</h2><p class="muted small" style="margin:4px 0 10px">Share of decided invoices approved with nobody touching them.</p>
               <div class="keys" style="display:grid;gap:6px">${outs.slice(0, 4).map((o) => `<span class="key"><i class="${o.k}"></i>${o.label} <b>${o.value}</b></span>`).join('')}</div></div></div></section>
-          <section class="panel"><div class="panel-head"><div><h2>Next up</h2><p>Closest deadline first</p></div>${queue.length ? `<a class="btn btn-sm btn-ghost" href="#/review">Open (${queue.length})</a>` : ''}</div>
-            ${queue.length ? `<div class="next">${queue.slice(0, 4).map((r) => `<a href="#/review?id=${esc(r.run_id)}"><span class="row-between"><b>${esc(title(r))}</b>${dueChip(r)}</span><small class="muted">${esc(human((r.reasons || [])[0] || route(r)?.reason || ''))}</small></a>`).join('')}</div>`
-              : '<div class="empty" style="padding:26px"><p>Nothing is waiting on a person.</p></div>'}</section>
           <section class="panel panel-pad"><h2 style="font-size:15.5px;margin-bottom:14px">Ledger</h2><div class="ledger">
             <div><span>Invoice value handled</span><b>${moneyShort(im.value)}</b></div>
             <div><span>Value held back</span><b>${moneyShort(s.money_stopped)}</b></div>

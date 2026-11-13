@@ -7,10 +7,6 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from asa_invoice_processor import decide, extract_invoice, read_document
-try:
-    from rapidocr_onnxruntime import RapidOCR
-except Exception:
-    RapidOCR = None
 
 ROOT = Path(__file__).parent; SAMPLES = ROOT / "samples"
 RUNS = ROOT / "run_history.json"; VERIFIED = ROOT / "manual_verification.json"

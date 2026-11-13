@@ -399,7 +399,7 @@ def test_ai_vision_sends_page_images_and_reads_json(monkeypatch, list_response):
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def read(self, *args):
-            return json.dumps({"choices": [{"message": {"content": json.dumps([{"text": invoice_text(), "bill_kind": "tax_invoice", "already_paid": False}] if list_response else {"text": invoice_text(), "bill_kind": "tax_invoice", "already_paid": False})}}]}).encode()
+            return json.dumps({"choices": [{"message": {"content": json.dumps([{"text": invoice_text(), "bill_kind": "tax_invoice", "already_paid": False, "fields": {"total": {"value": 1000, "evidence": "Grand Total: 1000.00"}, "tax": {"value": 999, "evidence": "Tax: 180.00"}}}] if list_response else {"text": invoice_text(), "bill_kind": "tax_invoice", "already_paid": False, "fields": {"total": {"value": 1000, "evidence": "Grand Total: 1000.00"}, "tax": {"value": 999, "evidence": "Tax: 180.00"}}})}}]}).encode()
     def open_request(req, timeout):
         captured.append(json.loads(req.data))
         return Response()
@@ -410,6 +410,8 @@ def test_ai_vision_sends_page_images_and_reads_json(monkeypatch, list_response):
     content = captured[0]["messages"][0]["content"]
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
     assert result["already_paid"] is False
+    assert result["fields"]["total"] == 1000
+    assert result["fields"]["tax"] is None
 
 
 def test_ocr_and_ai_start_in_parallel_and_ai_can_win(monkeypatch):

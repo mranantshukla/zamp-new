@@ -181,7 +181,7 @@ def read_document_cached(raw, suffix):
         script = "import sys,json; from asa_invoice_processor import read_document; print(json.dumps(read_document(sys.stdin.buffer.read(),sys.argv[1])))"
         try:
             child = subprocess.run([sys.executable, "-c", script, suffix], input=raw,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT, env={**os.environ, "OCR_CHILD": "1"},
                                    timeout=float(os.getenv("OCR_PROCESS_TIMEOUT", "25")), check=True)
             result = tuple(json.loads(child.stdout.decode().strip().splitlines()[-1]))
         except (subprocess.SubprocessError, ValueError, IndexError) as exc:
@@ -239,6 +239,7 @@ def read_parallel(raw, suffix, rid=None):
                     best_ocr = result
                     text, method, pages, cached = result
                 fields = extract_invoice(text)
+                if readers[future] == "ai": fields.update(result.get("fields") or {})
                 usable = fields.get("total") is not None and fields.get("vendor") and fields.get("subtotal") is not None
                 name = "AI image reader" if readers[future] == "ai" else "OCR reader"
                 report(name, "COMPLETED" if usable else "BLOCKED", "Usable read selected" if usable else "Read incomplete; waiting for the other reader")
@@ -297,6 +298,13 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         current = "Field extraction"; stage(rid, current, "RUNNING")
         invoice = extract_invoice(text)
         if vision and vision["status"] == "COMPLETED":
+            structured = vision.get("fields") or {}
+            invoice.update(structured)
+            invoice["field_metadata"].update(vision.get("field_metadata") or {})
+            invoice["details"]["seller"] = invoice.get("vendor")
+            invoice["details"]["invoice_date"] = invoice.get("date")
+            if "tax" in structured:
+                invoice["details"]["tax_breakdown"] = {}
             invoice["details"].update({k: vision[k] for k in ("bill_kind", "already_paid") if k in vision})
             for metadata in invoice.get("field_metadata", {}).values():
                 metadata.update(method="ai_vision", reliability="CONTEXTUAL", validation_status="AI_TRANSCRIBED")

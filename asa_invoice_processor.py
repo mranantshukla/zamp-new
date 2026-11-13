@@ -20,10 +20,12 @@ try:
 except Exception:
     fitz = None
 try:
+    if os.getenv("RENDER") == "true" and os.getenv("OCR_CHILD") != "1": raise ImportError("OCR is isolated from the web worker")
     from rapidocr_onnxruntime import RapidOCR
 except Exception:
     RapidOCR = None
 try:
+    if os.getenv("RENDER") == "true" and os.getenv("OCR_CHILD") != "1": raise ImportError("Image preprocessing runs in the OCR child")
     import cv2
     import numpy as np
 except Exception:
@@ -145,6 +147,20 @@ def _ocr_once(data: bytes) -> str:
     # Reuse models and serialize inference on memory-limited demo instances.
     with OCR_LOCK:
         if OCR_ENGINE is None:
+            # RapidOCR 1.2.3 does not expose ONNX thread limits. Configure its
+            # session factory before model creation to avoid host-wide thread
+            # counts on a fractional-CPU service.
+            import rapidocr_onnxruntime.utils as ort_utils
+            if not getattr(ort_utils, "_bounded_threads", False):
+                original_session = ort_utils.InferenceSession
+                def bounded_session(path, sess_options=None, **kwargs):
+                    from onnxruntime import SessionOptions
+                    options = sess_options or SessionOptions()
+                    options.intra_op_num_threads = 1
+                    options.inter_op_num_threads = 1
+                    return original_session(path, sess_options=options, **kwargs)
+                ort_utils.InferenceSession = bounded_session
+                ort_utils._bounded_threads = True
             OCR_ENGINE = RapidOCR(use_angle_cls=False, det_model_path=None, det_limit_type="max",
                                   det_limit_side_len=1280, rec_model_path=None, rec_batch_num=1)
         result, _ = OCR_ENGINE(data)

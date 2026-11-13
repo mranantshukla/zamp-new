@@ -47,7 +47,7 @@ def test_v1_database_migrates_additively_and_backfills(tmp_path, monkeypatch):
     assert set(storage.SUMMARY_COLUMNS) <= columns
     assert {i["name"] for i in inspect(engine).get_indexes("processing_runs")} >= {"ix_runs_vendor_key", "ix_runs_po_key"}
     with engine.connect() as conn:
-        assert conn.exec_driver_sql("SELECT max(version) FROM schema_migrations").scalar() == 2
+        assert conn.exec_driver_sql("SELECT max(version) FROM schema_migrations").scalar() == storage.SCHEMA_VERSION
         row = conn.exec_driver_sql("SELECT vendor_key, invoice_key, po_key, total, due_date, archived, "
                                    "processing_seconds, routing FROM processing_runs").one()
     assert tuple(row) == ("acmesupplies", "old1", "po1", 400.0, "2026-12-01", 1, 1.5, "INVOICE_AP_WORKFLOW")
@@ -256,11 +256,14 @@ def test_security_headers(client):
     assert response.headers["Referrer-Policy"] == "same-origin"
 
 
-def test_dashboard_renders_new_controls(client):
+def test_workspace_shell_and_assets(client):
     html = client.get("/").get_data(as_text=True)
-    assert "id='recordcount'" in html and "id='auditlink'" in html and "/api/analytics/summary" in html
-    js = client.get("/static/experience.js").get_data(as_text=True)
-    assert "masterdata" in js and "loadPayables" in js
+    assert 'id="view"' in html and "/static/app.js" in html and "/static/app.css" in html
+    assert 'href="#/review"' in html and "window.APP" in html
+    js = client.get("/static/app.js").get_data(as_text=True)
+    for route in ("overviewPage", "uploadPage", "reviewPage", "invoicePage", "vendorsPage", "dataPage", "howPage"):
+        assert route in js
+    assert client.get("/static/app.css").status_code == 200
 
 
 def test_bulk_upload_is_queued_through_bounded_pool(client):
@@ -286,8 +289,7 @@ def test_blank_po_label_does_not_borrow_next_label():
     assert processor.extract_invoice("TAX INVOICE\nPO No\nPO-1001\nTotal: 5")["po_number"] == "PO-1001"
 
 
-def test_inlined_css_is_not_html_escaped(client):
-    # Autoescaped quotes turned @import url('...') into a relative URL, so every
-    # page load re-requested the whole dashboard as a "stylesheet".
+def test_font_stylesheet_url_is_not_html_escaped(client):
+    # An escaped URL becomes relative and re-requests the whole page as CSS.
     html = client.get("/").get_data(as_text=True)
-    assert "&#39;https://fonts" not in html and "url('https://fonts.googleapis.com" in html
+    assert "&#39;https://fonts" not in html and 'href="https://fonts.googleapis.com/css2?family=Geist' in html

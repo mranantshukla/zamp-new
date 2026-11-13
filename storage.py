@@ -37,9 +37,14 @@ runs = Table("processing_runs", meta, Column("id", String(36), primary_key=True)
              Column("invoice_key", String(200)), Column("po_key", String(100)),
              Column("total", Float), Column("invoice_date", String(40)), Column("due_date", String(40)),
              Column("processing_seconds", Float), Column("routing", String(30)),
-             Column("archived", Integer, nullable=False, server_default="0"))
+             Column("archived", Integer, nullable=False, server_default="0"),
+             # v3: exception workflow. route_team/flags derive from the decision;
+             # resolution is a reviewer's final call and never overwrites status,
+             # which stays the immutable automated decision.
+             Column("route_team", String(40)), Column("flags", String(600)), Column("resolution", String(20)))
 SUMMARY_COLUMNS = ("vendor", "vendor_key", "invoice_key", "po_key", "total", "invoice_date",
-                   "due_date", "processing_seconds", "routing", "archived")
+                   "due_date", "processing_seconds", "routing", "archived", "route_team", "flags")
+ADDED_COLUMNS = SUMMARY_COLUMNS + ("resolution",)
 stages = Table("processing_stages", meta, Column("id", Integer, primary_key=True, autoincrement=True),
                Column("run_id", String(36), ForeignKey("processing_runs.id"), nullable=False),
                Column("stage", String(50), nullable=False), Column("status", String(15), nullable=False),
@@ -58,8 +63,9 @@ ocr_cache = Table("ocr_cache", meta, Column("key", String(100), primary_key=True
 
 INDEXES = (Index("ix_runs_created_at", runs.c.created_at), Index("ix_runs_status_created", runs.c.status, runs.c.created_at),
            Index("ix_runs_vendor_key", runs.c.vendor_key), Index("ix_runs_po_key", runs.c.po_key),
-           Index("ix_stages_run_id", stages.c.run_id, stages.c.id), Index("ix_reviews_run_id", reviews.c.run_id))
-SCHEMA_VERSION = 2
+           Index("ix_stages_run_id", stages.c.run_id, stages.c.id), Index("ix_reviews_run_id", reviews.c.run_id),
+           Index("ix_runs_route_team", runs.c.route_team))
+SCHEMA_VERSION = 3
 
 def now(): return datetime.now(timezone.utc)
 
@@ -72,9 +78,14 @@ def _number(value):
     try: return None if value in (None, "") else float(value)
     except (TypeError, ValueError): return None
 
-def summary_values(payload):
+def summary_values(payload, status=None):
     """Indexable columns derived from a run payload."""
+    import workflow
     timings = payload.get("timings") or {}
+    checks = (payload.get("decision") or {}).get("checks") or []
+    route = payload.get("review_route")
+    if route is None and status and (payload.get("document_routing") or {}).get("status") != "NON_INVOICE":
+        route = workflow.route(status, checks)
     return {"vendor": (str(payload["vendor"])[:200] if payload.get("vendor") else None),
             "vendor_key": (_key(payload.get("vendor")) or "")[:200] or None,
             "invoice_key": (_key(payload.get("invoice_number")) or "")[:200] or None,
@@ -84,7 +95,9 @@ def summary_values(payload):
             "due_date": str(payload.get("due_date") or "")[:40] or None,
             "processing_seconds": _number(timings.get("total_seconds")),
             "routing": (payload.get("document_routing") or {}).get("status"),
-            "archived": 1 if payload.get("archived") else 0}
+            "archived": 1 if payload.get("archived") else 0,
+            "route_team": (route or {}).get("team"),
+            "flags": ",".join(workflow.failing_checks(checks))[:600] or None}
 
 def initialize():
     """Create or additively migrate the schema. Existing data is never dropped."""
@@ -93,19 +106,22 @@ def initialize():
         version = conn.execute(select(func.max(migrations.c.version))).scalar()
         if version is None:
             conn.execute(insert(migrations).values(version=1)); version = 1
-        if version < 2:
-            # v2: summary columns, indexes and master data. create_all() does not
-            # add columns to an existing table, so add any that are missing.
-            existing = {c["name"] for c in inspect(conn).get_columns("processing_runs")}
-            for name in SUMMARY_COLUMNS:
-                if name in existing: continue
-                ddl = runs.c[name].type.compile(dialect=conn.dialect)
-                default = " NOT NULL DEFAULT 0" if name == "archived" else ""
-                conn.exec_driver_sql(f"ALTER TABLE processing_runs ADD COLUMN {name} {ddl}{default}")
-            for row in conn.execute(select(runs.c.id, runs.c.payload)).mappings():
-                conn.execute(update(runs).where(runs.c.id == row["id"])
-                             .values(**summary_values(json.loads(row["payload"] or "{}"))))
-            conn.execute(insert(migrations).values(version=2))
+        # create_all() never adds columns to an existing table. Add whichever
+        # later-schema columns are missing and backfill only those, so an
+        # upgrade never resets state such as the archived flag.
+        existing = {c["name"] for c in inspect(conn).get_columns("processing_runs")}
+        missing = [name for name in ADDED_COLUMNS if name not in existing]
+        for name in missing:
+            ddl = runs.c[name].type.compile(dialect=conn.dialect)
+            default = " NOT NULL DEFAULT 0" if name == "archived" else ""
+            conn.exec_driver_sql(f"ALTER TABLE processing_runs ADD COLUMN {name} {ddl}{default}")
+        derived = [name for name in missing if name in SUMMARY_COLUMNS]
+        if derived:
+            for row in conn.execute(select(runs.c.id, runs.c.payload, runs.c.status)).mappings():
+                values = summary_values(json.loads(row["payload"] or "{}"), row["status"])
+                conn.execute(update(runs).where(runs.c.id == row["id"]).values(**{k: values[k] for k in derived}))
+        for target in range(version + 1, SCHEMA_VERSION + 1):
+            conn.execute(insert(migrations).values(version=target))
         for index in INDEXES:
             index.create(conn, checkfirst=True)
 
@@ -152,7 +168,7 @@ def add_stage(rid, stage, status, detail=""):
 def finish_run(rid, payload, status):
     with engine.begin() as conn:
         conn.execute(update(runs).where(runs.c.id == rid).values(
-            payload=json.dumps(payload, default=str), status=status, **summary_values(payload)))
+            payload=json.dumps(payload, default=str), status=status, **summary_values(payload, status)))
 
 # Bulky evidence omitted from list responses; the full run is at /api/runs/<id>.
 HEAVY_KEYS = ("invoice", "decision", "ai_review", "ai_extraction", "comparisons")
@@ -164,6 +180,7 @@ def _row(row, slim=False):
         for key in HEAVY_KEYS: payload.pop(key, None)
     value.update(payload)
     value["archived"] = bool(row.get("archived") or payload.get("archived"))
+    value["route_team"] = row.get("route_team")
     value["run_id"] = value.pop("id")
     value["time"] = value.pop("created_at").isoformat()
     return value
@@ -180,24 +197,34 @@ def get_run(rid):
                                                         .where(reviews.c.run_id == rid).order_by(reviews.c.at)).mappings()]
         return result
 
-def _list_query(include_archived=False, status=None, day=None, search=None):
+def _list_query(include_archived=False, status=None, day=None, search=None, open_only=False, team=None):
     query = select(runs)
     if not include_archived: query = query.where(runs.c.archived == 0)
-    if status: query = query.where(runs.c.status == status)
+    # The review queue: routed invoices nobody has resolved yet. Filed
+    # non-invoices have no route, so they never appear here.
+    if open_only: query = query.where(runs.c.resolution.is_(None), runs.c.route_team.is_not(None),
+                                      runs.c.status == "PENDING_REVIEW")
+    if team: query = query.where(runs.c.route_team == team)
+    # Status filters use the effective outcome: a reviewer-approved invoice is
+    # "approved" for the person searching, while status keeps the automated call.
+    if status: query = query.where(func.coalesce(runs.c.resolution, runs.c.status) == status)
     if day:
         start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
         query = query.where(runs.c.created_at >= start, runs.c.created_at < start + timedelta(days=1))
     if search and search.isascii():
         # Coarse SQL pre-filter; callers apply the exact field filter afterwards.
-        pattern = "%" + search.replace("\\", "").replace("%", "").replace("_", "") + "%"
-        query = query.where(or_(runs.c.payload.ilike(pattern), runs.c.source.ilike(pattern), runs.c.id.ilike(pattern),
-                                 runs.c.status.ilike(pattern)))
+        # Escape LIKE wildcards rather than stripping them, so "INV_01" or
+        # "50%" still match literally.
+        pattern = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        like = lambda col: col.ilike(pattern, escape="\\")
+        query = query.where(or_(like(runs.c.payload), like(runs.c.source), like(runs.c.id), like(runs.c.status)))
     return query
 
-def list_runs(limit=300, include_archived=False, *, offset=0, status=None, day=None, search=None, slim=False):
+def list_runs(limit=300, include_archived=False, *, offset=0, status=None, day=None, search=None, slim=False,
+              open_only=False, team=None):
     """Newest-first runs. Filtering and pagination happen in SQL."""
     with engine.connect() as conn:
-        query = _list_query(include_archived, status, day, search)
+        query = _list_query(include_archived, status, day, search, open_only, team)
         result = conn.execute(query.order_by(runs.c.created_at.desc(), runs.c.id).limit(limit).offset(offset)).mappings()
         rows = [_row(r, slim=slim) for r in result]
         if slim and rows:
@@ -211,9 +238,9 @@ def list_runs(limit=300, include_archived=False, *, offset=0, status=None, day=N
                 row["reviews"] = [latest[row["run_id"]]] if row["run_id"] in latest else []
         return rows
 
-def count_runs(include_archived=False, status=None, day=None):
+def count_runs(include_archived=False, status=None, day=None, open_only=False, team=None):
     with engine.connect() as conn:
-        query = _list_query(include_archived, status, day).with_only_columns(func.count()).order_by(None)
+        query = _list_query(include_archived, status, day, None, open_only, team).with_only_columns(func.count()).order_by(None)
         return conn.execute(query).scalar() or 0
 
 def archive_history():
@@ -241,8 +268,10 @@ def _decision_history(conn, invoice, exclude=None):
     related = [c for c in ((runs.c.vendor_key == vendor_key) if vendor_key else None,
                            (runs.c.po_key == po_key) if po_key else None) if c is not None]
     if not related: return []
-    query = (select(runs.c.id, runs.c.status, runs.c.event_type, runs.c.vendor_key, runs.c.invoice_key,
-                    runs.c.po_key, runs.c.total, runs.c.invoice_date)
+    # A reviewer's resolution is the effective outcome for the ledger: an
+    # invoice approved by a person blocks duplicates and consumes PO balance.
+    query = (select(runs.c.id, func.coalesce(runs.c.resolution, runs.c.status).label("status"), runs.c.event_type,
+                    runs.c.vendor_key, runs.c.invoice_key, runs.c.po_key, runs.c.total, runs.c.invoice_date)
              .where(runs.c.status != "RUNNING", runs.c.event_type != "dataset_evaluation", or_(*related)))
     if exclude: query = query.where(runs.c.id != exclude)
     return [{"run_id": r["id"], "status": r["status"], "event_type": r["event_type"], "vendor": r["vendor_key"],
@@ -288,8 +317,82 @@ def locked_decision(rid, invoice, po_path, method, extra=None, finalize=None, ma
                 conn.execute(insert(stages).values(run_id=rid, stage=name, status=status,
                                                    detail=detail, at=now()))
             conn.execute(update(runs).where(runs.c.id == rid).values(
-                payload=json.dumps(payload, default=str), status=decision.status, **summary_values(payload)))
+                payload=json.dumps(payload, default=str), status=decision.status, **summary_values(payload, decision.status)))
             return decision
+
+class ResolutionConflict(ValueError):
+    """The run cannot be resolved as requested (already resolved, wrong state,
+    or approving it now would break a ledger rule)."""
+
+def resolve_run(rid, action, reviewer, note, corrections, recheck):
+    """Record a reviewer's final approve/reject for an invoice awaiting review.
+
+    ``recheck(invoice, history)`` re-runs the decision engine on the (possibly
+    corrected) invoice against the current ledger and returns the Decision.
+    Approval is refused when that decision is a confirmed violation, e.g. the
+    PO was consumed or the same invoice was approved since. Serialised with
+    automated decisions so two approvals cannot both consume the same balance.
+    """
+    with decision_lock:
+        with engine.begin() as conn:
+            if engine.dialect.name == "postgresql": conn.execute(text("SELECT pg_advisory_xact_lock(9183415)"))
+            row = conn.execute(select(runs).where(runs.c.id == rid)).mappings().first()
+            if not row: raise LookupError("Run not found")
+            if row["status"] != "PENDING_REVIEW": raise ResolutionConflict("Only invoices waiting for review can be resolved")
+            if row["resolution"]: raise ResolutionConflict(f"Already {row['resolution'].lower()} by a reviewer")
+            payload = json.loads(row["payload"] or "{}")
+            if (payload.get("document_routing") or {}).get("status") == "NON_INVOICE":
+                raise ResolutionConflict("This document is filed as a non-invoice and cannot be approved or rejected")
+            invoice = dict(payload.get("invoice") or {})
+            invoice.update(corrections or {})
+            if corrections:
+                metadata = dict(invoice.get("field_metadata") or {})
+                for field, value in corrections.items():
+                    metadata[field] = {"value": value, "evidence": note, "method": "manual_review",
+                                       "reliability": "MANUALLY_VERIFIED", "validation_status": "CORRECTED",
+                                       "manual_correction": True}
+                invoice["field_metadata"] = metadata
+            recheck_result = None
+            if action == "APPROVED":
+                decision = recheck(invoice, _decision_history(conn, invoice, exclude=rid))
+                recheck_result = {"status": decision.status, "reasons": decision.reasons}
+                if decision.status == "REJECTED":
+                    # Name only the rules that block approval, not review-level notes.
+                    blocking = [c["detail"] for c in decision.checks if c.get("outcome") == "CONFIRMED_VIOLATION"]
+                    raise ResolutionConflict("Cannot approve: " + "; ".join(blocking[:3] or decision.reasons[:2]))
+            outcome = "APPROVED_BY_REVIEWER" if action == "APPROVED" else "REJECTED_BY_REVIEWER"
+            payload["resolution_detail"] = {"status": action, "reviewer": reviewer, "note": note, "at": now().isoformat(),
+                                     "corrections": corrections or {}, "recheck": recheck_result}
+            values = {"resolution": action, "payload": json.dumps(payload, default=str)}
+            if corrections:  # Ledger columns follow the corrected, reviewer-verified values.
+                corrected = summary_values({**payload, **{k: invoice.get(k) for k in ("vendor", "invoice_number", "po_number", "total", "date")}},
+                                           row["status"])
+                values.update({k: corrected[k] for k in ("vendor", "vendor_key", "invoice_key", "po_key", "total", "invoice_date")})
+            conn.execute(update(runs).where(runs.c.id == rid).values(**values))
+            conn.execute(insert(reviews).values(id=str(uuid.uuid4()), run_id=rid, reviewer=reviewer, outcome=outcome,
+                                                note=note, corrections=json.dumps(corrections or {}),
+                                                revised_decision=json.dumps(recheck_result) if recheck_result else None, at=now()))
+            return payload["resolution_detail"]
+
+def reviewer_stats():
+    """Final reviewer decisions with time from intake to decision."""
+    with engine.connect() as conn:
+        return [dict(r) for r in conn.execute(
+            select(reviews.c.reviewer, reviews.c.outcome, reviews.c.at, runs.c.created_at)
+            .join(runs, runs.c.id == reviews.c.run_id)
+            .where(reviews.c.outcome.in_(("APPROVED_BY_REVIEWER", "REJECTED_BY_REVIEWER")))).mappings()]
+
+def recent_stage_events(limit_runs=200):
+    """Final stage events for the latest finished runs, for time-per-step."""
+    with engine.connect() as conn:
+        ids = [r[0] for r in conn.execute(select(runs.c.id).where(runs.c.status != "RUNNING")
+                                          .order_by(runs.c.created_at.desc()).limit(limit_runs))]
+        if not ids: return {}
+        events = {}
+        for r in conn.execute(select(stages.c.run_id, stages.c.stage, stages.c.status, stages.c.at)
+                              .where(stages.c.run_id.in_(ids)).order_by(stages.c.id)).mappings():
+            events.setdefault(r["run_id"], []).append(dict(r))
+        return events
 
 def get_master(kind):
     with engine.connect() as conn:
@@ -307,14 +410,16 @@ def approved_by_po():
     with engine.connect() as conn:
         return {r[0]: (r[1] or 0.0, r[2]) for r in conn.execute(
             select(runs.c.po_key, func.sum(runs.c.total), func.count())
-            .where(runs.c.status == "APPROVED", runs.c.event_type != "dataset_evaluation", runs.c.po_key.is_not(None))
+            .where(func.coalesce(runs.c.resolution, runs.c.status) == "APPROVED",
+                   runs.c.event_type != "dataset_evaluation", runs.c.po_key.is_not(None))
             .group_by(runs.c.po_key))}
 
 def analytics_rows(include_archived=True):
     """Lightweight column-only rows for analytics; never parses payloads."""
     query = select(runs.c.id, runs.c.status, runs.c.event_type, runs.c.vendor, runs.c.vendor_key, runs.c.total,
                    runs.c.due_date, runs.c.invoice_date, runs.c.processing_seconds, runs.c.routing,
-                   runs.c.created_at, runs.c.source)
+                   runs.c.created_at, runs.c.source, runs.c.resolution, runs.c.route_team, runs.c.flags,
+                   runs.c.po_key, runs.c.invoice_key)
     if not include_archived: query = query.where(runs.c.archived == 0)
     with engine.connect() as conn:
         return [dict(r) for r in conn.execute(query).mappings()]

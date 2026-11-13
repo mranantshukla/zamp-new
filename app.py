@@ -18,11 +18,12 @@ from xml.sax.saxutils import escape as xml_escape
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import Flask, Response, abort, jsonify, redirect, render_template_string, request, session, url_for
+from flask import Flask, Response, abort, jsonify, redirect, render_template, render_template_string, request, session, url_for
 from werkzeug.utils import secure_filename
 
 import storage
 import master_data
+import workflow
 import asa_invoice_processor as processor
 from asa_invoice_processor import classify_document, extract_invoice, read_document
 from asa_dashboard import dataset_rows, dataset_image_bytes, evaluate_dataset
@@ -90,8 +91,10 @@ def logged_in():
 def guard():
     if request.path in ("/healthz", "/login") or request.path.startswith("/static/"): return
     if not logged_in(): return redirect(url_for("login"))
-    if request.method in ("POST", "PUT", "DELETE") and request.headers.get("X-CSRF-Token") != session.get("csrf"):
-        abort(403)
+    if request.method in ("POST", "PUT", "DELETE"):
+        token = request.headers.get("X-CSRF-Token") or request.form.get("csrf")
+        if not token or not hmac.compare_digest(token, session.get("csrf") or ""):
+            abort(403)
 
 COMPRESSIBLE = ("application/json", "text/html", "text/csv", "text/css", "application/javascript", "text/javascript")
 
@@ -221,7 +224,10 @@ def process_run(rid, raw, suffix, event_type="upload", label=None):
         def finalize(decision):
             ai_review = review_invoice(invoice, decision)
             checks = {c["check"]: c for c in decision.checks}
-            extra = {"ai_extraction": ai_extraction, "ai_review": ai_review,
+            # Unreadable/unknown documents still need a person; only filed
+            # non-invoices (challans, POs, credit notes) leave the queue.
+            review_route = workflow.route(decision.status, decision.checks) if routing["status"] != "NON_INVOICE" else None
+            extra = {"ai_extraction": ai_extraction, "ai_review": ai_review, "review_route": review_route,
                      "document_routing": routing,
                      "timings": {"ocr_seconds": round(time.monotonic()-ocr_started, 2),
                                  "ai_extraction_seconds": round(time.monotonic()-ai_started, 2),
@@ -320,12 +326,14 @@ def runs_api():
         try: day = date.fromisoformat(request.args["date"])
         except ValueError: return jsonify(error="date must be YYYY-MM-DD"), 400
     limit, offset = _int_arg("limit", 300, 1, 1000), _int_arg("offset", 0, 0, 10**7)
+    open_only, team = request.args.get("open") == "1", request.args.get("team") or None
     rows = storage.list_runs(limit=limit, offset=offset, status=decision or None, day=day,
-                             search=query or vendor or None, slim=True)
+                             search=query or vendor or None, slim=True, open_only=open_only, team=team)
     rows = [r for r in rows if (not vendor or vendor in str(r.get("vendor") or "").casefold()) and
             (not query or any(query in str(r.get(k) or '').casefold() for k in SEARCH_FIELDS))]
     response = jsonify(rows)
-    response.headers["X-Total-Count"] = str(storage.count_runs(status=decision or None, day=day))
+    response.headers["X-Total-Count"] = str(storage.count_runs(status=decision or None, day=day,
+                                                               open_only=open_only, team=team))
     return response
 
 @app.get('/api/runs/export.csv')
@@ -431,6 +439,8 @@ def document_api(rid):
                     headers={"Content-Disposition":"inline; filename=\"" + secure_filename(doc.filename) + "\"",
                              "Cache-Control":"private, no-store", "X-Content-Type-Options":"nosniff"})
 
+CORRECTABLE_FIELDS = {"invoice_number", "po_number", "vendor", "gstin", "date", "total", "subtotal", "discount", "tax"}
+
 @app.post("/api/runs/<rid>/reviews")
 def review_api(rid):
     data = request.get_json(silent=True) or {}
@@ -440,8 +450,7 @@ def review_api(rid):
     corrections = data.get("corrections") or {}
     if not reviewer or outcome not in ("VERIFIED", "NEEDS_CORRECTION") or not isinstance(corrections, dict) or (outcome == "NEEDS_CORRECTION" and not note):
         return jsonify(error="Reviewer, valid outcome and correction note are required"), 400
-    allowed = {"invoice_number", "po_number", "vendor", "gstin", "date", "total", "subtotal", "discount", "tax"}
-    if set(corrections) - allowed: return jsonify(error="Unknown correction field"), 400
+    if set(corrections) - CORRECTABLE_FIELDS: return jsonify(error="Unknown correction field"), 400
     row = storage.get_run(rid)
     if not row: abort(404)
     revised = None
@@ -525,6 +534,12 @@ def master_put(kind):
     return jsonify(saved=len(rows), note="Applies to invoices processed from now on; existing decisions are unchanged.")
 
 AGING_BUCKETS = ("Overdue", "Due in 0-7 days", "Due in 8-30 days", "Due in 31+ days", "No due date")
+# Assumed manual handling time per invoice for the "time saved" estimate. It is
+# an operator-supplied assumption, shown as such in the UI, not a measurement.
+MANUAL_MINUTES_PER_INVOICE = float(os.getenv("MANUAL_MINUTES_PER_INVOICE", "8"))
+
+def _effective(row):
+    return row.get("resolution") or row["status"]
 
 @app.get("/api/analytics/summary")
 def analytics_summary():
@@ -532,104 +547,244 @@ def analytics_summary():
     today = date.today()
     rows = [r for r in storage.analytics_rows(include_archived=request.args.get("archived") == "1")
             if r["event_type"] != "dataset_evaluation"]
+    # Everything except filed non-invoices: unreadable/unknown documents are
+    # candidate invoices that a person must handle, so they count and queue.
+    invoices = [r for r in rows if r["routing"] != "NON_INVOICE"]
     by_status = defaultdict(lambda: {"count": 0, "value": 0.0})
     aging = {name: {"count": 0, "value": 0.0} for name in AGING_BUCKETS}
     vendors = defaultdict(lambda: {"vendor": None, "invoices": 0, "approved_value": 0.0, "exceptions": 0})
+    stop_reasons = defaultdict(lambda: {"review": 0, "rejected": 0})
+    queue = defaultdict(lambda: {"open": 0, "overdue": 0})
+    daily = defaultdict(lambda: {"APPROVED": 0, "PENDING_REVIEW": 0, "REJECTED": 0, "FAILED": 0})
     seconds = []
+    now_utc = datetime.now(timezone.utc)
     for r in rows:
-        bucket = by_status[r["status"]]; bucket["count"] += 1; bucket["value"] += r["total"] or 0
         if r["processing_seconds"] is not None: seconds.append(r["processing_seconds"])
+    for r in invoices:
+        status = _effective(r)
+        bucket = by_status[status]; bucket["count"] += 1; bucket["value"] += r["total"] or 0
+        created = r["created_at"] if r["created_at"].tzinfo else r["created_at"].replace(tzinfo=timezone.utc)
+        if status in daily[created.date().isoformat()]: daily[created.date().isoformat()][status] += 1
         if r["vendor_key"]:
             v = vendors[r["vendor_key"]]; v["vendor"] = v["vendor"] or r["vendor"]; v["invoices"] += 1
-            if r["status"] == "APPROVED": v["approved_value"] += r["total"] or 0
-            if r["status"] in ("PENDING_REVIEW", "REJECTED"): v["exceptions"] += 1
-        if r["status"] == "APPROVED":
+            if status == "APPROVED": v["approved_value"] += r["total"] or 0
+            if status in ("PENDING_REVIEW", "REJECTED"): v["exceptions"] += 1
+        if r["status"] in ("PENDING_REVIEW", "REJECTED"):
+            for flag in filter(None, (r["flags"] or "").split(",")):
+                stop_reasons[flag]["rejected" if r["status"] == "REJECTED" else "review"] += 1
+        if r["status"] == "PENDING_REVIEW" and not r["resolution"]:
+            team = r["route_team"] or "AP Specialist"
+            queue[team]["open"] += 1
+            if (now_utc - created).total_seconds() / 3600 > workflow.sla_hours(team): queue[team]["overdue"] += 1
+        if status == "APPROVED":
             due = processor.parse_date(r["due_date"])
             name = ("No due date" if not due else "Overdue" if due < today else "Due in 0-7 days"
                     if (due - today).days <= 7 else "Due in 8-30 days" if (due - today).days <= 30 else "Due in 31+ days")
             aging[name]["count"] += 1; aging[name]["value"] += r["total"] or 0
-    decided = sum(by_status[s]["count"] for s in ("APPROVED", "REJECTED", "PENDING_REVIEW"))
-    # Tile metrics mirror the dashboard's definitions: non-invoices are counted
-    # separately and excluded from approval/exception rates and invoice value.
-    invoices = [r for r in rows if (r["routing"] or "INVOICE_AP_WORKFLOW") == "INVOICE_AP_WORKFLOW"]
-    inv_count = lambda status: sum(1 for r in invoices if r["status"] == status)
-    inv_decided = sum(inv_count(s) for s in ("APPROVED", "REJECTED", "PENDING_REVIEW"))
+    count = lambda status: by_status[status]["count"]
+    decided = sum(count(s) for s in ("APPROVED", "REJECTED", "PENDING_REVIEW"))
+    touchless = sum(1 for r in invoices if r["status"] == "APPROVED")
     invoice_metrics = {"invoices": len(invoices), "value": round(sum(r["total"] or 0 for r in invoices), 2),
-                       "approved": inv_count("APPROVED"), "pending": inv_count("PENDING_REVIEW"),
-                       "rejected": inv_count("REJECTED"), "decided": inv_decided,
+                       "approved": count("APPROVED"), "pending": count("PENDING_REVIEW"),
+                       "rejected": count("REJECTED"), "decided": decided, "touchless": touchless,
+                       "approved_by_reviewer": sum(1 for r in invoices if r["resolution"] == "APPROVED"),
+                       "rejected_by_reviewer": sum(1 for r in invoices if r["resolution"] == "REJECTED"),
                        "non_invoices": sum(1 for r in rows if r["routing"] == "NON_INVOICE")}
+    # Time per step: gap between consecutive stage completions, so long OCR is
+    # attributed to OCR rather than to every stage that was "running" alongside.
+    step_totals, step_counts = defaultdict(float), defaultdict(int)
+    for events in storage.recent_stage_events().values():
+        finals = {}
+        for e in events:
+            if e["status"] in ("COMPLETED", "BLOCKED", "SKIPPED", "FAILED"): finals[e["stage"]] = e["at"]
+        started = next((e["at"] for e in events if e["status"] == "RUNNING"), None)
+        previous = started
+        for name in STAGE_NAMES:
+            if name in finals and previous is not None:
+                step_totals[name] += max(0.0, (finals[name] - previous).total_seconds()); step_counts[name] += 1
+                previous = finals[name]
+    reviewers = defaultdict(lambda: {"approved": 0, "rejected": 0, "seconds": []})
+    for r in storage.reviewer_stats():
+        entry = reviewers[r["reviewer"]]
+        entry["approved" if r["outcome"] == "APPROVED_BY_REVIEWER" else "rejected"] += 1
+        created = r["created_at"] if r["created_at"].tzinfo else r["created_at"].replace(tzinfo=timezone.utc)
+        at = r["at"] if r["at"].tzinfo else r["at"].replace(tzinfo=timezone.utc)
+        entry["seconds"].append((at - created).total_seconds())
     seconds.sort()
     top = sorted(vendors.values(), key=lambda v: (-v["approved_value"], -v["invoices"]))[:10]
     return jsonify(
         as_of=today.isoformat(), documents=len(rows), decided=decided, invoice_metrics=invoice_metrics,
-        touchless_rate=round(invoice_metrics["approved"] / inv_decided, 4) if inv_decided else None,
-        exception_rate=round((invoice_metrics["rejected"] + invoice_metrics["pending"]) / inv_decided, 4) if inv_decided else None,
+        touchless_rate=round(touchless / decided, 4) if decided else None,
+        exception_rate=round((count("REJECTED") + count("PENDING_REVIEW")) / decided, 4) if decided else None,
+        money_stopped=round(by_status["REJECTED"]["value"], 2),
+        time_saved_minutes=round(touchless * MANUAL_MINUTES_PER_INVOICE, 1),
+        manual_minutes_per_invoice=MANUAL_MINUTES_PER_INVOICE,
         by_status={k: {"count": v["count"], "value": round(v["value"], 2)} for k, v in by_status.items()},
         aging=[{"bucket": k, "count": v["count"], "value": round(v["value"], 2)} for k, v in aging.items()],
         top_vendors=[{**v, "approved_value": round(v["approved_value"], 2)} for v in top],
+        daily=[{"date": d, **v} for d, v in sorted(daily.items())[-30:]],
+        stop_reasons=sorted(({"check": k, "label": workflow.CHECK_LABELS.get(k, k), **v} for k, v in stop_reasons.items()),
+                            key=lambda x: -(x["review"] + x["rejected"]))[:8],
+        queue=[{"team": t, **queue[t], "sla_hours": workflow.sla_hours(t)} for t in workflow.TEAMS],
+        step_seconds=[{"stage": n, "seconds": round(step_totals[n] / step_counts[n], 3)} for n in STAGE_NAMES if step_counts[n]],
+        reviewers=[{"reviewer": k, "approved": v["approved"], "rejected": v["rejected"],
+                    "median_seconds": sorted(v["seconds"])[len(v["seconds"]) // 2] if v["seconds"] else None}
+                   for k, v in sorted(reviewers.items())],
         processing_seconds={"median": seconds[len(seconds) // 2] if seconds else None,
                             "p95": seconds[min(len(seconds) - 1, int(len(seconds) * 0.95))] if seconds else None})
+
+@app.post("/api/runs/<rid>/resolve")
+def resolve_api(rid):
+    """A reviewer's final approve/reject for an invoice waiting for review.
+    The automated decision is preserved alongside it for audit."""
+    data = request.get_json(silent=True) or {}
+    action = str(data.get("action") or "").upper()
+    reviewer = str(data.get("reviewer") or "").strip()[:80]
+    note = str(data.get("note") or "").strip()[:1000]
+    corrections = data.get("corrections") or {}
+    if action not in ("APPROVED", "REJECTED") or not reviewer:
+        return jsonify(error="Choose approve or reject and enter your name"), 400
+    if action == "REJECTED" and not note:
+        return jsonify(error="Say why the invoice is rejected; the note goes to the vendor email"), 400
+    if not isinstance(corrections, dict) or set(corrections) - CORRECTABLE_FIELDS:
+        return jsonify(error="Unknown correction field"), 400
+    for field in ("total", "subtotal", "discount", "tax"):
+        if field in corrections:
+            try: corrections[field] = float(corrections[field])
+            except (TypeError, ValueError): return jsonify(error=f"{field} must be a number"), 400
+    masters = master_data.decision_masters(ROOT / "samples")
+    def recheck(invoice, history):
+        # The reviewer has checked the document, so OCR uncertainty no longer
+        # softens ledger rules: an over-PO or duplicate approval is a confirmed
+        # violation and blocks the approval. ("ocr" must not be in the method.)
+        from asa_invoice_processor import decide
+        return decide(invoice, ROOT / "samples" / "pos.csv", method="reviewer_verified", history_rows=history,
+                      pos=masters.get("po_master"), vendor_master=masters.get("vendor_master"))
+    try:
+        result = storage.resolve_run(rid, action, reviewer, note, corrections, recheck)
+    except LookupError: abort(404)
+    except storage.ResolutionConflict as exc: return jsonify(error=str(exc)), 409
+    log.info("run %s %s by reviewer %s", rid, action, reviewer)
+    return jsonify(saved=True, resolution=result)
+
+@app.get("/api/vendors")
+def vendors_api():
+    """Vendor profiles: master record, activity in this workspace, open PO balance."""
+    rows = [r for r in storage.analytics_rows(include_archived=True)
+            if r["event_type"] != "dataset_evaluation" and r["routing"] != "NON_INVOICE"]
+    vendor_rows, info = master_data.load("vendor_master", ROOT / "samples")
+    po_rows, _ = master_data.load("po_master", ROOT / "samples")
+    approved_po = storage.approved_by_po()
+    profiles = {}
+    def profile(name):
+        key = storage._key(name)
+        if key not in profiles:
+            profiles[key] = {"vendor": name, "status": None, "gstin": None, "on_file": False, "invoices": 0,
+                             "approved": 0, "approved_value": 0.0, "waiting": 0, "rejected": 0, "last_invoice": None,
+                             "open_pos": 0, "po_remaining": 0.0, "attention": []}
+        return profiles[key]
+    for v in vendor_rows or []:
+        p = profile(v["vendor"]); p.update(on_file=True, status=v.get("status") or "APPROVED", gstin=v.get("gstin") or None)
+    for po in po_rows or []:
+        p = profile(po["vendor"])
+        if vendor_rows is None: p["on_file"] = True; p["status"] = p["status"] or "APPROVED"
+        if str(po.get("status") or "OPEN").upper() in ("", "OPEN", "APPROVED"):
+            used, _count = approved_po.get(storage._key(po["po_number"]), (0.0, 0))
+            p["open_pos"] += 1; p["po_remaining"] += po["po_amount"] - po["invoiced_to_date"] - used
+    for r in rows:
+        if not r["vendor"]: continue
+        p = profile(r["vendor"]); status = _effective(r); p["invoices"] += 1
+        if status == "APPROVED": p["approved"] += 1; p["approved_value"] += r["total"] or 0
+        elif status == "PENDING_REVIEW": p["waiting"] += 1
+        elif status == "REJECTED": p["rejected"] += 1
+        stamp = r["created_at"].isoformat()
+        if not p["last_invoice"] or stamp > p["last_invoice"]: p["last_invoice"] = stamp
+    for p in profiles.values():
+        if not p["on_file"]: p["attention"].append("Not in vendor master")
+        if str(p["status"] or "").upper() in ("BLOCKED", "PROHIBITED", "UNAUTHORISED"): p["attention"].append("Blocked in vendor master")
+        if p["rejected"]: p["attention"].append(f"{p['rejected']} rejected invoice(s)")
+        if p["po_remaining"] < -0.005: p["attention"].append("Billed over open PO value")
+        p["approved_value"] = round(p["approved_value"], 2); p["po_remaining"] = round(p["po_remaining"], 2)
+    ordered = sorted(profiles.values(), key=lambda p: (not p["attention"], -p["invoices"], p["vendor"].casefold()))
+    return jsonify(vendors=ordered, source=info.get("source"))
+
+# Sample inbox: bundled fictional documents with the behaviour each demonstrates.
+DEMO_DOCS = {
+    "01_clean_invoice.pdf": ("Happy path", "Clean invoice, exact PO match", "Acme Supplies",
+                             "Approved. Vendor, PO-1001 and arithmetic all check out, so nobody has to touch it."),
+    "02_duplicate_invoice.pdf": ("Edge case", "Same invoice sent twice", "Acme Supplies",
+                                 "Rejected. Run after the clean invoice: the same vendor and invoice number were already approved."),
+    "03_po_overage.pdf": ("Edge case", "Bill exceeds the PO balance", "Acme Supplies",
+                          "Rejected. After the clean invoice consumed PO-1001, this 1,180.00 bill has no balance left."),
+    "04_missing_po.pdf": ("Needs a person", "No purchase order quoted", "Acme Supplies",
+                          "Sent to Procurement. Nothing to match against, so a buyer has to confirm the order."),
+    "05_scanned_invoice.png": ("Scan", "Image-only invoice read by OCR", "Acme Supplies",
+                               "Approved. Text is read from the image, every key field sits beside its label, and PO-1004 has balance."),
+    "06_delivery_challan.pdf": ("Not an invoice", "Delivery challan", "Acme Supplies",
+                                "Filed, not paid. It records goods delivered, so it stays out of approval numbers."),
+}
+
+def _demo_files():
+    folder = ROOT / "samples" / "demo"
+    return sorted(f for f in folder.iterdir() if f.suffix.lower() in (".pdf", ".png", ".jpg", ".jpeg")) if folder.is_dir() else []
+
+@app.get("/api/demo")
+def demo_list():
+    items = []
+    for f in _demo_files():
+        tag, title, vendor, expect = DEMO_DOCS.get(f.name, ("Sample", f.stem.replace("_", " ").title(), "", ""))
+        items.append({"file": f.name, "tag": tag, "title": title, "vendor": vendor, "expect": expect,
+                      "kind": "image" if f.suffix.lower() != ".pdf" else "pdf"})
+    return jsonify(items)
+
+@app.get("/api/demo/<name>")
+def demo_file(name):
+    match = next((f for f in _demo_files() if f.name == name), None)
+    if not match: abort(404)
+    mime = "application/pdf" if match.suffix.lower() == ".pdf" else "image/png" if match.suffix.lower() == ".png" else "image/jpeg"
+    return Response(match.read_bytes(), mimetype=mime, headers={"Cache-Control": "private, max-age=300"})
+
+@app.post("/api/demo/<name>")
+def demo_run(name):
+    match = next((f for f in _demo_files() if f.name == name), None)
+    if not match: abort(404)
+    raw = match.read_bytes()
+    try: filename, mime = validate_file(match.name, raw)
+    except ValueError as exc: return jsonify(error=str(exc)), 400
+    rid = storage.create_run(filename, "upload", raw, mime)
+    submit_run(rid, raw, Path(filename).suffix)
+    return jsonify(run_id=rid), 202
+
+@app.get("/api/meta")
+def meta_api():
+    """Static vocabulary for the UI: plain-language check names, teams, stages."""
+    benchmark = {}
+    try:
+        data = json.loads((ROOT / "dataset_benchmark.json").read_text(encoding="utf-8"))
+        outcomes = data.get("field_outcomes") or {}
+        comparable = sum(outcomes.get(k, 0) for k in ("Exact match", "Mismatch", "Extraction missing"))
+        benchmark = {"samples": data.get("samples"), "exact": outcomes.get("Exact match", 0), "comparable": comparable,
+                     "accuracy": data.get("field_exact_match_accuracy")}
+    except (OSError, ValueError): pass
+    return jsonify(checks=workflow.CHECK_LABELS, stages=STAGE_NAMES,
+                   teams=[{"team": t, "sla_hours": workflow.sla_hours(t), "handles": v["handles"]} for t, v in workflow.TEAMS.items()],
+                   benchmark=benchmark, manual_minutes_per_invoice=MANUAL_MINUTES_PER_INVOICE,
+                   po_tolerance_pct=processor.PolicyConfig.from_environment().po_tolerance_pct)
 
 @app.get("/")
 def index():
     if "csrf" not in session: session["csrf"] = os.urandom(24).hex()
-    samples = [(i, f"Indian GST invoice {i+1:02d}") for i, _ in enumerate(dataset_rows())]
-    css_path = ROOT / "dashboard.css"
-    if not css_path.exists(): css_path = Path(__file__).parent / "dashboard.css"
-    css = css_path.read_text(encoding="utf-8")
-    html = render_template_string(INDEX_HTML, csrf=session["csrf"], samples=samples, css=css)
-    review_markup = "<section class='card' id='reviewqueue'><div class='section-heading'><div><span class='eyebrow'>WORK QUEUE</span><h2>Review queue</h2></div><span class='muted'>Human attention required</span></div><div id='reviewrows' class='timeline'><p class='muted'>No invoices currently require review.</p></div></section>"
-    config_markup = """<section class='card' id='aiconfiguration'><div class='section-heading'><div><span class='eyebrow'>OPTIONAL AI ASSISTANCE</span><h2>Model configuration</h2></div><span class='muted'>Evidence-gated</span></div><div class='config-grid'><label>OpenAI-compatible endpoint<input id='aiendpoint' type='url' placeholder='https://api.openai.com/v1/chat/completions'></label><label>Model<input id='aimodel' placeholder='e.g. gemini-2.0-flash'></label><label>API key<input id='aiapikey' type='password' autocomplete='new-password' placeholder='Stored only for this server session'></label></div><div class='button-row'><button id='saveaiconfig' class='button'>Save AI configuration</button><button id='testaiconfig' class='button secondary'>Test AI connection</button></div><p id='aiconfigmessage' class='muted'>The model reconciles OCR text before validation, then provides an advisory review. It cannot bypass PO, vendor, GST, duplicate, or financial checks.</p></section>"""
-    html = html.replace("<section class='card' id='history'>", review_markup + config_markup + "<section class='card' id='history'>", 1)
-    html = html.replace("<div id='reason'></div>", "<div id='reason'></div><section class='ai-review'><span class='eyebrow'>AI EVIDENCE REVIEW</span><div id='aiprofile' class='muted'>Waiting for automated evidence review.</div></section>", 1)
-    sidebar = """<aside class='side'><div class='logo'>zamp<span>.</span></div><div class='side-caption'>DIGITAL WORKFORCE</div><nav class='app-nav' aria-label='Main navigation'><a href='#home'><span>⌂</span>Home</a><a href='#history'><span>▤</span>My invoices</a><a href='#upload'><span>⌁</span>Scan &amp; upload</a><a href='#reviewqueue'><span>!</span>Review centre</a><a href='#history'><span>◷</span>Reports</a><a href='#aiconfiguration'><span>⚙</span>AI configuration</a></nav><div class='side-footer'>AP Intelligence<br><b>Operational workspace</b></div></aside>"""
-    html = html.replace("<aside class='side'><div class='logo'>Z</div><a href='#upload'>◇</a><a href='#history'>◷</a></aside>", sidebar, 1)
-    html = html.replace("<main class='content'>", "<main class='content' id='home'>", 1)
-    hero = """<section class='hero'><div class='hero-copy'><span class='eyebrow'>ZAMP · AP INTELLIGENCE</span><h1>Let your digital<br>workforce run AP.</h1><p>Invoice capture, validation and exception handling — with people involved where judgement matters.</p><a class='hero-action' href='#upload'>Process an invoice <span>→</span></a></div><div class='hero-graphic' aria-hidden='true'><div class='orbit orbit-one'></div><div class='orbit orbit-two'></div><div class='node node-one'></div><div class='node node-two'></div><div class='node node-three'></div><div class='hero-label'>AUTONOMOUS<br>OPERATIONS</div></div></section>"""
-    html = html.replace("<section class='hero'><span class='eyebrow'>ZAMP · ACCOUNTS PAYABLE</span><h1>Your bills, under control.</h1><p>Read documents, validate procurement evidence and route exceptions.</p></section>", hero, 1)
-    ui_overrides = """
-    body{background:#f5f3ee;color:#131313;font-family:Inter,Manrope,'DM Sans','Segoe UI',sans-serif}.shell{display:grid;grid-template-columns:236px minmax(0,1fr);min-height:100vh}
-    .side{background:#101010;color:#f3f0eb;padding:30px 20px;display:flex;flex-direction:column;gap:24px;position:sticky;top:0;height:100vh}.side .logo{color:#fff;font-size:25px;font-weight:900;letter-spacing:-1.8px;padding:0 10px}.side .logo span{color:#ff956b}.side-caption{font-size:9px;letter-spacing:1.7px;color:#8a8782;padding:0 10px}.app-nav{display:grid;gap:5px;margin-top:20px}.side .app-nav a{display:flex;align-items:center;gap:11px;padding:12px;border-radius:10px;color:#aaa6a0;font-size:13px;font-weight:700;text-decoration:none;transition:color .2s,background .2s}.side .app-nav a span{width:16px;text-align:center;font-size:16px}.side .app-nav a:hover{background:#23211f;color:#fff}.side-footer{margin-top:auto;border-top:1px solid #302e2b;padding:18px 10px 0;color:#817d77;font-size:11px;line-height:1.7}.side-footer b{color:#dad4cc;font-weight:600}
-    .content{min-width:0;padding:25px clamp(18px,3vw,44px) 70px;max-width:1500px;width:100%;margin:0 auto}
-    .hero{background:#111;color:#fff;border-radius:26px;padding:clamp(32px,4vw,64px);min-height:390px;display:grid;grid-template-columns:minmax(0,1.1fr) minmax(250px,.9fr);align-items:center;gap:20px;position:relative;overflow:hidden;margin-bottom:24px}.hero-copy{position:relative;z-index:2}.hero h1{font-size:clamp(42px,5vw,76px);letter-spacing:-4px;line-height:.93;margin:17px 0 20px;font-weight:800}.hero p{max-width:470px;color:#c7c1ba;font-size:15px;line-height:1.6}.hero .eyebrow{color:#ffab83}.hero-action{display:inline-flex;align-items:center;gap:24px;margin-top:22px;background:#f1eee8;color:#111;border-radius:100px;padding:12px 18px;text-decoration:none;font-size:12px;font-weight:800}.hero-action span{font-size:18px}.hero-graphic{min-height:280px;position:relative;background:radial-gradient(circle at 50% 50%,#fb9c7f 0%,#da7693 23%,#9f699f 44%,#252033 70%);border-radius:50%;aspect-ratio:1;justify-self:center;width:min(100%,330px);box-shadow:0 0 0 1px #ffffff22 inset}.orbit{position:absolute;border:1px solid #ffffff55;border-radius:50%;inset:16%;animation:orbit 9s linear infinite}.orbit-two{inset:31%;border-style:dashed;animation-direction:reverse;animation-duration:12s}.node{position:absolute;width:10px;height:10px;background:#fff;border-radius:50%;box-shadow:0 0 20px #fff}.node-one{top:19%;left:24%}.node-two{right:13%;bottom:30%;background:#ffcfad}.node-three{bottom:12%;left:36%;width:7px;height:7px}.hero-label{position:absolute;bottom:18%;right:-8%;font-size:9px;letter-spacing:1.5px;line-height:1.6;color:#fff;text-align:right}@keyframes orbit{to{transform:rotate(360deg)}}
-    .metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:24px}.metric{background:#fffdf9;border:1px solid #dedad3;border-radius:13px;padding:16px 18px;box-shadow:none;transition:transform .18s,border-color .18s}.metric:hover{transform:translateY(-2px);border-color:#aa9b91}.metric b{display:block;font-size:25px;margin-top:6px;color:#161616}.metric-label{font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:#78736d;font-weight:800}.config-grid{display:grid;grid-template-columns:1.5fr 1fr 1fr;gap:12px;margin:16px 0}.config-grid label{font-size:12px;font-weight:700;color:#554f49}.config-grid input{margin:6px 0 0}.config-grid+button{margin-top:3px}
-    .grid{display:grid;grid-template-columns:minmax(300px,.9fr) minmax(330px,1.1fr);gap:18px;margin:0}.card{background:#fffdf9;border:1px solid #dedad3;border-radius:17px;padding:23px;box-shadow:none;margin-bottom:18px}.card h2{font-size:20px;letter-spacing:-.7px}.button{border-radius:9px;background:#151515;color:#fff;padding:12px 15px;transition:transform .16s,background .16s}.button:hover{background:#33302d;transform:translateY(-1px)}.activity{background:#151515!important;border-radius:12px!important;padding:18px!important;color:#f2eee9!important}.tablewrap{overflow-x:auto}.tablewrap table{min-width:100%}.badge.APPROVED{background:#e9f8ef;color:#14714b}.badge.REJECTED,.badge.FAILED{background:#ffe9ed;color:#b32643}.badge.PENDING_REVIEW{background:#fff3d6;color:#8a620e}.ai-review{margin:18px 0;padding:15px;border:1px solid #e2ddd5;border-left:3px solid #ec936a;border-radius:10px;background:#fcf7f1}.ai-review p{margin:7px 0}.preview{transition:transform .2s}.is-scanning .preview{animation:scanPulse 1.2s ease-in-out infinite}@keyframes scanPulse{50%{box-shadow:0 0 0 4px #d9798b33}}#monitor{background:linear-gradient(135deg,#111 0%,#191919 62%,#23211f 100%);border-color:#252525;color:#f6f2eb;overflow:hidden;position:relative}#monitor .eyebrow,#monitor h2{color:#f6f2eb}#monitor .cols{grid-template-columns:minmax(290px,1.15fr) minmax(260px,.85fr);align-items:start;gap:20px}.pipeline{display:grid;gap:7px;max-height:470px;padding-right:6px;overflow:auto}.pipeline-head{display:flex;justify-content:space-between;align-items:center;padding:0 0 10px;color:#9d978f;font-size:10px;letter-spacing:1.4px;font-weight:800;border-bottom:1px solid #3b3935}.pipeline-head b{color:#f4a37f;font-size:10px}.pipeline-stage{display:grid;grid-template-columns:27px 1fr auto;align-items:start;gap:10px;padding:11px 8px;border:1px solid #302e2a;background:#171716;border-radius:8px}.pipeline-stage .step{width:22px;height:22px;display:grid;place-items:center;border-radius:50%;background:#2e2c29;color:#aaa49b;font-size:10px;font-weight:800}.pipeline-stage strong{display:block;color:#f5f1ea;font-size:13px}.pipeline-stage small{display:block;color:#aaa49b;font-size:11px;line-height:1.45;margin-top:3px}.pipeline-status{font-size:9px;letter-spacing:.7px;font-weight:900;padding-top:4px}.pipeline-stage.COMPLETED .step{background:#234c3c;color:#a9efc9}.pipeline-stage.COMPLETED .pipeline-status{color:#9be6bf}.pipeline-stage.RUNNING{border-color:#f09a73;box-shadow:0 0 0 1px #f09a7333}.pipeline-stage.RUNNING .step{background:#f09a73;color:#1b1512}.pipeline-stage.RUNNING .pipeline-status{color:#f6ba9e}.pipeline-stage.BLOCKED .step,.pipeline-stage.FAILED .step{background:#592a31;color:#ffb8bf}.pipeline-stage.BLOCKED .pipeline-status,.pipeline-stage.FAILED .pipeline-status{color:#ffabb5}.pipeline-stage.SKIPPED{opacity:.55}.pipeline-doc{background:#f4f1eb;border-radius:11px;padding:9px;border:1px solid #3c3934}.pipeline-doc:before{content:'SOURCE DOCUMENT';display:block;color:#6d665d;letter-spacing:1.2px;font-size:9px;font-weight:900;padding:4px 4px 8px}.pipeline-doc .preview{height:390px;background:#e8e4dd;border:0;border-radius:6px}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
-    @media(max-width:1000px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.config-grid{grid-template-columns:1fr 1fr}}@media(max-width:740px){.shell{display:block}.side{height:auto;position:static;flex-direction:row;align-items:center;padding:10px 16px;gap:10px}.app-nav{display:flex;overflow:auto;margin:0}.side .app-nav a{white-space:nowrap;padding:8px}.side .app-nav a span{display:none}.content{padding:16px 14px 60px}.grid,.cols,.config-grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.card{padding:18px}#monitor .cols{grid-template-columns:1fr}#monitor .cols>div:last-child{order:-1}.pipeline-doc .preview{height:280px}}
-    """
-    ai_ui = """<script>(() => { const original = window.renderRun; if (!original) return;
-    window.renderRun = function(run) { original(run); const timeline=document.getElementById('timeline'); const monitor=timeline.closest('.card'); if(monitor) monitor.id='monitor'; const preview=document.getElementById('previewimg'); if(preview && preview.parentElement) preview.parentElement.classList.add('pipeline-doc'); const order=['Document received','PDF text / OCR','Document classification','Field extraction','AI OCR reconciliation','Extraction validation','Vendor verification','PO matching','Financial validation','Duplicate detection','AP decision','AI evidence review','History persistence']; const latest={}; (run.stages||[]).forEach(s=>latest[s.stage]=s); const finished=Object.values(latest).filter(s=>['COMPLETED','BLOCKED','FAILED','SKIPPED'].includes(s.status)).length; timeline.className='timeline pipeline'; timeline.innerHTML=`<div class='pipeline-head'><span>EXECUTION TRACE</span><b>${finished}/${order.length} STAGES</b></div>`+order.map((name,index)=>{const stage=latest[name]||{status:'PENDING',detail:'Awaiting pipeline execution'};return `<div class='pipeline-stage ${esc(stage.status)}'><span class='step'>${index+1}</span><div><strong>${esc(name)}</strong><small>${esc(stage.detail||'No additional detail')}</small></div><span class='pipeline-status'>${esc(stage.status)}</span></div>`}).join(''); const target = document.getElementById('aiprofile');
-      if (!target) return; const review = run.ai_review; if (!review) { target.textContent = 'No AI evidence review is available for this historical run.'; return; }
-      const flags = (review.flagged_checks || []).map(flag => `${flag.check}: ${flag.outcome}`).join(' · ');
-      const opinion = review.model_second_opinion || {}; const model = opinion.status === 'COMPLETED' ? ` · Model: ${opinion.model || 'configured'} — ${opinion.response?.summary || 'second opinion received'}` : (opinion.status === 'UNAVAILABLE' ? ` · Model unavailable: ${opinion.error}` : '');
-      target.innerHTML = `<b>${esc(review.recommendation)}</b><p>${esc(review.summary)}${esc(model)}</p>${flags ? `<small>${esc(flags)}</small>` : ''}`;
-    };
-    const endpoint = document.getElementById('aiendpoint'); if (!endpoint) return;
-    (async () => { try { const cfg = await (await fetch('/api/ai/config')).json(); endpoint.value=cfg.endpoint||''; document.getElementById('aimodel').value=cfg.model||''; document.getElementById('aiconfigmessage').textContent=cfg.api_key_configured ? 'A server-side key is configured. It will reconcile OCR text before validation; enter a new key only to replace it for this session.' : 'The model reconciles OCR text before validation, then provides an advisory review. It cannot bypass business checks.'; } catch (_) {} })();
-    document.getElementById('saveaiconfig').onclick = async () => { const message=document.getElementById('aiconfigmessage'); const response=await fetch('/api/ai/config',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({endpoint:endpoint.value,model:document.getElementById('aimodel').value,api_key:document.getElementById('aiapikey').value})}); const data=await response.json(); message.textContent=data.error || data.note || 'Configuration saved.'; if(response.ok) document.getElementById('aiapikey').value=''; };
-    document.getElementById('testaiconfig').onclick = async () => { const message=document.getElementById('aiconfigmessage'); message.textContent='Testing AI connection…'; const response=await fetch('/api/ai/connection-test',{method:'POST',headers:{'X-CSRF-Token':csrf}}); const data=await response.json(); message.textContent=data.note || data.error || 'AI connection test completed.'; };
-    })();</script>"""
-    html = html.replace("</head>", "<style>" + ui_overrides + "</style></head>", 1)
-    html = html.replace("</head>", "<meta name='theme-color' content='#090b10'><link rel='stylesheet' href='/static/experience.css'></head>", 1)
-    return html.replace("</body>", ai_ui + "<script src='/static/experience.js' defer></script></body>", 1)
+    return render_template("index.html", csrf=session["csrf"],
+                           samples=[(i, f"Indian GST invoice {i+1:02d}") for i, _ in enumerate(dataset_rows())],
+                           auth_enabled=bool(os.getenv("DEMO_USERNAME")))
 
-LOGIN_HTML = """<!doctype html><title>Sign in · ASA</title><main style='font:16px Arial;max-width:360px;margin:15vh auto'><h1>Invoice intelligence</h1><p>Sign in to view invoice records.</p><form method=post><input name=username placeholder=Username required><input name=password type=password placeholder=Password required><button>Sign in</button></form><p>{{error}}</p></main>"""
-INDEX_HTML = """<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>ASA Invoice Intelligence</title><style>{{ css|safe }}</style><style>
-body{margin:0;background:#f6f6f1;color:#182018;font:15px Arial,sans-serif}.shell{display:grid;grid-template-columns:94px 1fr;min-height:100vh}.side{background:#171a15;color:#ffec72;padding:25px 15px}.logo{font-size:30px;font-weight:900}.side a{display:block;color:#fff;text-decoration:none;margin:42px 0}.content{padding:28px 3vw;max-width:1500px}.hero{background:#ffec72;border-radius:24px;padding:30px 36px;margin-bottom:22px}.hero h1{font-size:32px;margin:0}.hero p{margin-bottom:0}.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.metric,.card{background:#fff;border:1px solid #e9e9dd;border-radius:20px;padding:22px}.metric b{display:block;font-size:25px;margin-top:10px}.grid{display:grid;grid-template-columns:minmax(300px,420px) 1fr;gap:22px;margin:22px 0}.card h2{margin:0 0 16px}.eyebrow{font-size:11px;letter-spacing:2px;color:#777c68;font-weight:800}.tabs{display:flex;gap:8px;margin:16px 0}.tabs button,.button{border:0;border-radius:12px;background:#ffec72;color:#1a1a13;padding:12px 16px;font-weight:800;cursor:pointer}input,select,textarea{box-sizing:border-box;width:100%;padding:12px;margin:7px 0 13px;border:1px solid #d9ddcb;border-radius:10px;background:white}.upload{border:2px dashed #cdd1bd;border-radius:15px;padding:18px}.preview{height:350px;width:100%;object-fit:contain;background:#fafaf5;border:1px solid #e7e8db;border-radius:12px}.timeline{display:grid;gap:6px;max-height:380px;overflow:auto}.stage{display:flex;justify-content:space-between;border-bottom:1px solid #eee;padding:9px}.stage small{color:#6b7562}.cols{display:grid;grid-template-columns:1fr 1fr;gap:20px}.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px;border-bottom:1px solid #eceee7;white-space:nowrap}th{color:#6b7562;font-size:11px;text-transform:uppercase}.badge{display:inline-block;border-radius:20px;padding:6px 10px;background:#eee}.APPROVED{background:#dff4e9;color:#147148}.REJECTED,.FAILED{background:#ffe3e3;color:#a52727}.PENDING_REVIEW{background:#fff2c7;color:#84630d}.muted{color:#677169}.error{color:#b02727}.details{white-space:pre-wrap;max-height:350px;overflow:auto}.review{margin-top:18px}.hide{display:none}@media(max-width:850px){.shell{grid-template-columns:1fr}.side{display:none}.grid,.cols,.metrics{grid-template-columns:1fr}.content{padding:15px}}
-</style></head><body><div class='shell'><aside class='side'><div class='logo'>Z</div><a href='#upload'>◇</a><a href='#history'>◷</a></aside><main class='content'><section class='hero'><span class='eyebrow'>ZAMP · ACCOUNTS PAYABLE</span><h1>Your bills, under control.</h1><p>Read documents, validate procurement evidence and route exceptions.</p></section><div class='metrics' id='metrics'></div><div class='grid'><section class='card' id='upload'><span class='eyebrow'>NEW RUN</span><h2>Add a bill</h2><div class='tabs'><button id='uploadtab'>Upload from computer</button><button id='sampletab'>Select from dataset</button></div><form id='uploadform' class='upload'><input type=file name=invoice_file accept='.pdf,.png,.jpg,.jpeg' required><button class='button'>Fetch bill details →</button></form><form id='sampleform' class='hide'><select id='sample'>{% for i,name in samples %}<option value='{{i}}'>{{name}}</option>{% endfor %}</select><button class='button'>Fetch dataset bill →</button></form><p class='muted'>PDF, PNG or JPEG · Up to 8 MB</p><p id='error' class='error'></p></section><section class='card'><span class='eyebrow'>LIVE ACTIVITY</span><h2>Run monitor</h2><div class='cols'><div><div id='timeline' class='timeline'><p class='muted'>Choose a bill to begin.</p></div></div><div><div id='previewempty' class='muted'>The source bill appears here.</div><iframe id='previewpdf' class='preview hide' title='Bill preview'></iframe><img id='previewimg' class='preview hide' alt='Bill preview'></div></div></section></div><section class='card hide' id='result'><span class='eyebrow'>DECISION EVIDENCE</span><h2 id='resulttitle'></h2><a id='auditlink' class='button secondary' href='#' download>Download audit record ↓</a><div id='reason'></div><div class='cols'><div><h3>Extracted fields</h3><div id='fields' class='tablewrap'></div><h3>PO matching</h3><div id='po'></div></div><div><h3>Financial validation</h3><div id='finance'></div><h3>Dataset evaluation</h3><div id='evaluation'></div></div></div><div class='review'><h3>Manual document review</h3><p class='muted'>Verification does not authorise payment. Corrections preserve the automated decision.</p><input id='reviewer' placeholder='Reviewer name'><select id='outcome'><option value='VERIFIED'>Verified against source</option><option value='NEEDS_CORRECTION'>Needs correction</option></select><textarea id='corrections' placeholder='Corrected fields as JSON, e.g. {"total": 1000}'></textarea><textarea id='note' placeholder='Review note'></textarea><button id='savereview' class='button'>Save review</button><p id='reviewmessage'></p><div id='reviews'></div></div></section><section class='card' id='history'><span class='eyebrow'>AUDIT TRAIL</span><h2>Processing history</h2><div class='cols'><select id='decisionfilter'><option value=''>All decisions</option><option>APPROVED</option><option>REJECTED</option><option>PENDING_REVIEW</option><option>FAILED</option></select><input id='vendorfilter' placeholder='Filter by vendor'></div><input id='datefilter' type=date><p id='recordcount' class='muted'></p><div class='tablewrap'><table><thead><tr><th>Time</th><th>Run ID</th><th>Type</th><th>Vendor</th><th>Seller GSTIN</th><th>Invoice</th><th>PO</th><th>Total</th><th>Method</th><th>Accuracy</th><th>Decision</th><th>Reason</th><th>Manual check</th></tr></thead><tbody id='historyrows'></tbody></table></div></section></main></div><script>
-const csrf={{ csrf|tojson }}; let active=null, source=null; const $=id=>document.getElementById(id); const esc=s=>String(s??'-').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function table(rows){return '<table>'+rows.map(r=>'<tr>'+r.map(x=>'<td>'+esc(x)+'</td>').join('')+'</tr>').join('')+'</table>'}
-function showTab(sample){$('uploadform').classList.toggle('hide',sample);$('sampleform').classList.toggle('hide',!sample)}$('uploadtab').onclick=()=>showTab(false);$('sampletab').onclick=()=>showTab(true);
-async function start(url,body){$('error').textContent='';let r=await fetch(url,{method:'POST',headers:{'X-CSRF-Token':csrf},body});let j=await r.json();if(!r.ok){$('error').textContent=j.error||'Request failed';return}active=j.run_id;showRun(active);}
-$('uploadform').onsubmit=e=>{e.preventDefault();start('/api/runs',new FormData(e.target))};$('sampleform').onsubmit=e=>{e.preventDefault();start('/api/samples/'+$('sample').value)};
-async function refresh(){let q=new URLSearchParams({decision:$('decisionfilter').value,vendor:$('vendorfilter').value,date:$('datefilter').value});let [response,summary]=await Promise.all([fetch('/api/runs?'+q),fetch('/api/analytics/summary').then(x=>x.json()).catch(()=>({}))]);let rows=await response.json();let invoices=rows.filter(r=>(r.document_routing?.status||'INVOICE_AP_WORKFLOW')==='INVOICE_AP_WORKFLOW');let m=summary.invoice_metrics||{};let completed=m.decided||0;let currency=new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0}).format(m.value||0);$('metrics').innerHTML=[['Invoices processed',m.invoices||0],['Invoice value',currency],['Auto-approval rate',completed?((m.approved/completed)*100).toFixed(1)+'%':'—'],['Exception rate',completed?(((m.pending+m.rejected)/completed)*100).toFixed(1)+'%':'—'],['Pending reviews',m.pending||0],['Rejected',m.rejected||0],['Non-invoice documents',m.non_invoices||0]].map(([k,v])=>`<div class='metric'><span class='metric-label'>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');let total=Number(response.headers.get('X-Total-Count')||rows.length);if($('recordcount'))$('recordcount').textContent=`Showing ${rows.length} of ${total} record(s)`;$('historyrows').innerHTML=rows.map(r=>`<tr><td>${esc(r.time)}</td><td><button class='button' onclick='showRun(${JSON.stringify(r.run_id)})'>${esc(r.run_id.slice(0,8))}</button></td><td>${esc(r.document_type)}</td><td>${esc(r.vendor)}</td><td>${esc(r.gstin)}</td><td>${esc(r.invoice_number)}</td><td>${esc(r.po_number)}</td><td>${esc(r.total)}</td><td>${esc(r.method)}</td><td>${r.field_accuracy==null?'-':(r.field_accuracy*100).toFixed(1)+'%'}</td><td><span class='badge ${esc(r.status)}'>${esc(r.status)}</span></td><td>${esc(r.document_routing?.reason||(r.reasons||[])[0])}</td><td>${esc((r.reviews||[]).at(-1)?.outcome||'Unchecked')}</td></tr>`).join('')||'<tr><td colspan=13>No runs yet</td></tr>';if($('reviewrows'))$('reviewrows').innerHTML=invoices.filter(r=>r.status==='PENDING_REVIEW').slice(0,8).map(r=>`<div class='stage'><b>${esc(r.invoice_number||'Invoice')}</b><span>${esc(r.vendor||'Unknown vendor')} · ${esc(r.total||'Amount unavailable')} <button class='button' onclick='showRun(${JSON.stringify(r.run_id)})'>Open</button></span></div>`).join('')||'<p class=muted>No invoices currently require review.</p>'}
-['decisionfilter','vendorfilter','datefilter'].forEach(id=>$(id).onchange=refresh);
-async function showRun(id){active=id;if(source)source.close();let r=await (await fetch('/api/runs/'+id)).json();let doc='/api/runs/'+id+'/document';$('previewempty').classList.add('hide');$('previewimg').classList.add('hide');$('previewpdf').classList.add('hide');if(r.document_id){let target=(r.source||'').toLowerCase().endsWith('.pdf')?$('previewpdf'):$('previewimg');target.src=doc;target.classList.remove('hide')}else $('previewempty').classList.remove('hide');renderRun(r);if(r.status==='RUNNING'){source=new EventSource('/api/runs/'+id+'/events');let queued=null;source.onmessage=()=>{if(queued)return;queued=setTimeout(async()=>{queued=null;if(active===id)renderRun(await (await fetch('/api/runs/'+id)).json())},250)};source.addEventListener('finished',async()=>{source.close();renderRun(await (await fetch('/api/runs/'+id)).json());refresh()})}}
-function renderRun(r){let latest={};(r.stages||[]).forEach(s=>latest[s.stage]=s);$('timeline').innerHTML=Object.entries(latest).map(([name,s])=>`<div class='stage'><div><b>${esc(name)}</b><br><small>${esc(s.detail)}</small></div><span>${esc(s.status)}</span></div>`).join('')||'<p class=muted>Waiting for processing events…</p>';if(r.status==='RUNNING')return;$('result').classList.remove('hide');$('resulttitle').innerHTML=`<span class='badge ${esc(r.status)}'>${esc(r.status)}</span> · ${esc(r.document_type)}`;$('reason').textContent=(r.reasons||[r.error||'']).join(' · ');let inv=r.invoice||{};$('fields').innerHTML=table(Object.entries(inv).filter(([k,v])=>!['raw_text','details','line_items','field_metadata'].includes(k)).map(([k,v])=>[k,typeof v==='object'?JSON.stringify(v):v]));$('po').textContent=JSON.stringify(r.decision?.po_matching||{},null,2);$('finance').innerHTML=table((r.decision?.financial_validation?.checks||[]).map(c=>[c.check,c.outcome,c.detail]));$('evaluation').innerHTML=r.comparisons?table(r.comparisons):'<p class=muted>No reference labels for this upload.</p>';if($('auditlink'))$('auditlink').href='/api/runs/'+r.run_id+'/audit.json';$('reviews').innerHTML=(r.reviews||[]).map(x=>`<p>${esc(x.outcome)} · ${esc(x.reviewer)} · ${esc(x.note)}</p>`).join('');}
-$('savereview').onclick=async()=>{let corrections={};try{corrections=$('corrections').value.trim()?JSON.parse($('corrections').value):{}}catch(e){$('reviewmessage').textContent='Corrections must be valid JSON';return}let r=await fetch('/api/runs/'+active+'/reviews',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({reviewer:$('reviewer').value,outcome:$('outcome').value,note:$('note').value,corrections})});let j=await r.json();$('reviewmessage').textContent=j.error||'Review saved. Automated decision retained.';if(r.ok){showRun(active);refresh()}};
-const clearButton=document.createElement('button');clearButton.className='button';clearButton.textContent='Clear history';clearButton.title='Archive visible runs; retain audit and duplicate records';$('history').insertBefore(clearButton,$('history').querySelector('.cols'));
-clearButton.onclick=async()=>{if(!confirm('Clear visible history? Audit records, PO balances and duplicate protection will remain.'))return;let r=await fetch('/api/history/clear',{method:'POST',headers:{'X-CSRF-Token':csrf}});let j=await r.json();if(r.ok){$('history').querySelector('h2').textContent='Processing history · '+j.archived+' archived';refresh()}};
-refresh();
-</script></body></html>"""
+LOGIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · zamp AP</title><link rel="stylesheet" href="/static/app.css"></head>
+<body class="login-page"><main class="login-card"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>zamp<span class="brand-sub">AP</span></a>
+<h1>Sign in</h1><p class="muted">Invoices, decisions and the review queue for your accounts payable team.</p>
+<form method="post" class="stack"><label>Username<input name="username" autocomplete="username" required autofocus></label>
+<label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+<button class="btn btn-primary">Sign in</button></form>{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}</main></body></html>"""
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "8766")), threaded=True)

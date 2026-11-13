@@ -6,7 +6,9 @@ An accounts payable case study that reads PDF or image bills, extracts invoice f
 
 - `asa_invoice_processor.py`: embedded PDF text, scanned-page rendering, RapidOCR, classification, extraction, GSTIN and financial checks.
 - `decision_policy.py`: deterministic three-outcome policy and configurable PO tolerance/OCR evidence grade.
-- `app.py`: Flask dashboard, live stage stream, preview, history, review and sample evaluation.
+- `app.py`: Flask JSON API, live stage stream, document preview, review workflow and sample evaluation.
+- `templates/index.html`, `static/app.js`, `static/app.css`: the workspace UI, a dependency-free single-page app (light theme by default, dark on toggle).
+- `workflow.py`: plain-language check names and exception routing: which team reviews an invoice, and its deadline.
 - `storage.py`: SQLAlchemy persistence for document bytes, runs, stages and reviews. PostgreSQL on Render; SQLite locally. Schema v2 adds indexed summary columns (vendor/invoice/PO keys, total, dates, routing, archived) so duplicate and PO-balance lookups touch only related rows; existing v1 databases are migrated additively on start-up.
 - `master_data.py`: validated PO and vendor master lists stored in the database (falling back to `samples/pos.csv` and `samples/vendor_master.csv`).
 - Successful OCR text is cached in the same database by document hash and OCR settings. Repeated uploads reuse OCR but always rerun vendor, PO, duplicate and financial decisions. Failed OCR is never cached.
@@ -41,6 +43,8 @@ The old text sample lacks subtotal and routes to review under the current policy
 | `PO_TOLERANCE_PCT` | Fractional overage allowance, default `0`, maximum `0.05`. |
 | `OCR_MIN_RELIABILITY` | `DIRECT_LABEL` (default) or `MANUALLY_VERIFIED`; ordinal evidence grade, not calibrated confidence. |
 | `PORT` | Production port from Render; local command accepts `--port`. |
+| `MANUAL_MINUTES_PER_INVOICE` | Assumed manual handling time behind the "time saved" figure, default `8`. Shown as an assumption in the UI. |
+| `SLA_HOURS_TREASURY_FRAUD`, `SLA_HOURS_VENDOR_MANAGEMENT`, `SLA_HOURS_PROCUREMENT`, `SLA_HOURS_AP_SPECIALIST` | Review deadlines per team in hours (defaults 8, 48, 48, 24). |
 | `PROCESSING_WORKERS` | Background processing threads, default `2`, maximum `8`. OCR is serialised, so extra workers mainly help PDF-text documents; batch uploads queue behind this pool. |
 | `AI_REVIEW_API_URL`, `AI_REVIEW_MODEL`, `AI_REVIEW_API_KEY` | Persistent AI provider configuration via server environment. The dashboard settings form only changes the running process. |
 
@@ -58,14 +62,14 @@ Run `python make_demo_assets.py` to recreate six fictional files in `samples/dem
 
 ```powershell
 python -m pip install pytest
-python -m pytest -q test_regressions.py test_app.py test_features.py
+python -m pytest -q test_regressions.py test_app.py test_features.py test_workflow.py
 ```
 
 To run the database-backed tests against PostgreSQL as well, point `TEST_DATABASE_URL` at an empty UTF-8 database (each test drops and recreates the schema):
 
 ```powershell
 $env:TEST_DATABASE_URL = "postgresql+psycopg://postgres@localhost:5432/asa_test"
-python -m pytest -q test_app.py test_features.py
+python -m pytest -q test_app.py test_features.py test_workflow.py
 ```
 
 Optional, idempotent legacy JSON import: set `DATABASE_URL`, then run `python migrate_legacy.py`. It reads `run_history.json` and `manual_verification.json` without deleting them. Legacy checks retain no invented reviewer identity.
@@ -73,6 +77,27 @@ Optional, idempotent legacy JSON import: set `DATABASE_URL`, then run `python mi
 ## Render
 
 `render.yaml` defines a Python web service, PostgreSQL, `/healthz`, generated secret, and demo login variables. Connect this repository through Render Blueprint, supply `DEMO_USERNAME` and `DEMO_PASSWORD`, and test the resulting URL. See `DEPLOYMENT.md`.
+
+## Workspace
+
+| Page | What it is for |
+| --- | --- |
+| Overview | How many invoices were handled and how many needed no one; money stopped, time saved, volume over time, why invoices were stopped, queue by team, time per step, top vendors, payables due. |
+| Upload | Drag and drop one file (opens the live view) or a batch of up to 25 (tracked together). A sample inbox runs six fictional documents, each showing a different outcome. |
+| Needs review | Open exceptions grouped by team, closest deadline first. |
+| Invoice | Source document beside its checks (in plain words), extracted values with their evidence, processing steps (live while running), activity and the audit record. Reviewers approve, reject or correct here. |
+| Invoices | Search, filter by result or date, export CSV/Excel, archive finished. |
+| Vendors | Every vendor with activity, open PO balance and anything needing attention. |
+| Orders & data | PO list with utilisation, payment record and vendor list; CSV upload with validation. |
+| How it works | The steps, the three outcomes, team routing, measured reading accuracy, and the optional AI connection. |
+
+Press ⌘K (or `/`) anywhere to search invoices or jump to a page. Your reviewer name is stored in the browser and recorded on each decision.
+
+### Review workflow
+
+An invoice that needs a person is routed by its failing checks: possible duplicates and GSTIN or identity problems go to **Treasury & Fraud**, unknown or blocked vendors to **Vendor Management**, PO problems to **Procurement**, and everything else to an **AP Specialist**. Each team has a deadline.
+
+A reviewer can **approve**, **reject** (with a reason, which feeds a ready-to-send vendor email), or **correct** extracted fields first. Approval re-runs the PO, duplicate and arithmetic rules on the corrected, reviewer-verified values against the current ledger; if it would over-bill a PO or duplicate an approved invoice it is refused with the rule that blocks it. The reviewer's decision is stored separately (`resolution`) and the automated decision is never overwritten. Reviewer-approved invoices count as approved for duplicate protection, PO balances and analytics. API: `POST /api/runs/<id>/resolve`.
 
 ## AP controls and workspace features
 
@@ -88,7 +113,7 @@ Optional, idempotent legacy JSON import: set `DATABASE_URL`, then run `python mi
 
 The workspace supports batch intake (up to 25 files per request), an operational Inbox, searchable records, Excel and CSV exports, vendor summaries derived from run history, a dedicated exception-review workspace, and review notes for selected invoices. A batch review preserves the automated decision and records the supplied reviewer identity and note. The interface sections share the Flask application; they are not separate server deployments. Email ingestion, accounting sync, scheduled notifications, team roles, payment scheduling, and PDF coordinate highlighting are not implemented; they require provider credentials, account mapping, and document location evidence. Vendor summaries do not replace vendor-master approval.
 
-The heuristic extractor remains weak on real bills: the current 22-image AjitRawat benchmark is **30/90 exact comparable fields (33.3%)**. OCR evidence grades are structural, not calibrated confidence. GST checks do not establish tax-law compliance. Interrupted runs are marked `FAILED` after a worker restart. Schema version 1 is initialized additively; future changes need a migration framework. Render free web services spin down and free Postgres expires after 30 days.
+US-style invoices ("INVOICE" without "TAX", `$` amounts, dates such as `Nov 3, 2026`) are often classified as unknown and miss dates or totals; they are routed to a person rather than approved. The heuristic extractor remains weak on real bills: the current 22-image AjitRawat benchmark is **30/90 exact comparable fields (33.3%)**. OCR evidence grades are structural, not calibrated confidence. GST checks do not establish tax-law compliance. Interrupted runs are marked `FAILED` after a worker restart. Schema version 1 is initialized additively; future changes need a migration framework. Render free web services spin down and free Postgres expires after 30 days.
 
 First-time OCR can still be slow on CPU-limited hosting. On one local sample (`invoice_07.jpg`), recognition batch size 1 took 3.3–3.4 seconds and batch size 6 took 5.8–5.9 seconds, so batch size 1 remains the default. These local timings do not predict Render latency. Exact-document cache hits avoid OCR on subsequent runs; cold documents still require OCR.
 

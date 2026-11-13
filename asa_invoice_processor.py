@@ -410,7 +410,9 @@ def extract_invoice(text: str) -> dict:
     if total_value is None and document_type != "PURCHASE_ORDER":
         total_value = money(pick([r"grand\s*total.*?(\d[\d,]*(?:\.\d{1,2})?)", r"\bonly\s+(\d[\d,]*(?:\.\d{1,2})?)"], clean))
     subtotal_raw = label_value(r"sub\s*-?\s*total|subtotal|taxable\s*value|net\s*before\s*tax")
-    shipping_raw = label_value(r"shipping\s*(?:charges?|amount)?|freight\s*(?:charges?|amount)?|delivery\s*charges?")
+    # Only totals-block charges: freight listed before subtotal is already a line item.
+    subtotal_index = next((i for i, line in enumerate(lines) if re.match(r"^(?:sub\s*-?\s*total|taxable\s*value|net\s*before\s*tax)\b", line, re.I)), None)
+    shipping_raw = pick([rf"(?m)^(?:shipping|freight|delivery)\s*(?:charges?|amount)?\s*:?\s*{MONEY}\s*$"], "\n".join(lines[subtotal_index + 1:])) if subtotal_index is not None else None
     discount_raw = label_value(r"discount|rebate|less\s*:?")
     rounded_off_raw = label_value(r"rounded\s*off|round\s*off")
     tax_raw = label_value(r"total\s*tax|total\s*gst|tax\s*amount")

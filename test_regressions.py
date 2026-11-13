@@ -397,7 +397,7 @@ def test_freight_discount_and_rounding_reconcile(tmp_path):
 
 
 def test_duplicate_marking_is_not_supplier():
-    inv = processor.extract_invoice("Duplicalt\nAcme Supplies\nTAX INVOICE\nInvoice No: A-1\nFreight Charges: 18\nSubtotal: 1000\nTotal Tax: 180\nGrand Total: 1198")
+    inv = processor.extract_invoice("Duplicalt\nAcme Supplies\nTAX INVOICE\nInvoice No: A-1\nSubtotal: 1000\nFreight Charges: 18\nTotal Tax: 180\nGrand Total: 1198")
     assert inv["vendor"] == "Acme Supplies"
     assert inv["details"]["shipping_amount"] == 18
 
@@ -414,3 +414,8 @@ def test_payment_change_requires_review_but_future_date_is_advisory(tmp_path):
     assert result.status == "PENDING_REVIEW"
     import workflow
     assert workflow.route(result.status, result.checks)["team"] == "Treasury & Fraud"
+
+
+def test_freight_line_is_not_counted_twice():
+    inv = processor.extract_invoice("Vendor: Acme\nTAX INVOICE\nFreight Charges: 18\nSubtotal: 1000\nTotal Tax: 180\nGrand Total: 1180")
+    assert inv["details"]["shipping_amount"] is None

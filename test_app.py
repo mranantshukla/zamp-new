@@ -97,6 +97,23 @@ def test_bulk_upload_search_and_csv_export(client):
     assert exported.status_code == 200
     assert b'BATCH-1' in exported.data and b'BATCH-2' in exported.data
 
+    workbook = client.get('/api/runs/export.xlsx')
+    assert workbook.status_code == 200
+    assert workbook.data[:2] == b'PK'
+
+
+def test_bulk_review_preserves_automated_decision(client):
+    pending = submit(client, pdf(invoice_text(number='NEEDS-REVIEW', po='', subtotal='', tax='', total='')))
+    assert pending['status'] == 'PENDING_REVIEW'
+    with client.session_transaction() as sess: csrf = sess['csrf']
+    response = client.post('/api/runs/bulk-review', json={
+        'run_ids': [pending['run_id']], 'reviewer': 'AP reviewer',
+        'outcome': 'VERIFIED', 'note': 'Source document inspected'}, headers={'X-CSRF-Token': csrf})
+    assert response.status_code == 200
+    reloaded = client.get('/api/runs/' + pending['run_id']).json
+    assert reloaded['status'] == 'PENDING_REVIEW'
+    assert reloaded['reviews'][0]['reviewer'] == 'AP reviewer'
+
 
 def test_ocr_cache_persists_but_decisions_are_recomputed(client, monkeypatch):
     calls = []

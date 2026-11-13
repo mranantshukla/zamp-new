@@ -157,6 +157,7 @@ def locked_decision(rid, invoice, po_path, method, extra=None, finalize=None):
             payload = {"invoice": decision.invoice, "invoice_number": invoice.get("invoice_number"),
                        "vendor": invoice.get("vendor"), "gstin": invoice.get("gstin"),
                        "po_number": invoice.get("po_number"), "total": invoice.get("total"),
+                       "due_date": (invoice.get("details") or {}).get("due_date"),
                        "document_type": decision.document_type, "method": method,
                        "decision": decision.__dict__, "reasons": decision.reasons,
                        **(extra or {}), **final_extra}

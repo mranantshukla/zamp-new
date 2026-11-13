@@ -10,6 +10,8 @@ import threading
 import time
 import csv
 import io
+import zipfile
+from xml.sax.saxutils import escape as xml_escape
 from datetime import timedelta
 from pathlib import Path
 
@@ -261,6 +263,26 @@ def export_runs():
         writer.writerow({key: '; '.join(row.get(key) or []) if key == 'reasons' else row.get(key) for key in fields})
     return Response(output.getvalue(), mimetype='text/csv', headers={'Content-Disposition':'attachment; filename="asa_invoice_records.csv"'})
 
+@app.get('/api/runs/export.xlsx')
+def export_runs_xlsx():
+    """Excel workbook built in memory; no external office dependency required."""
+    fields = ['time','run_id','source','document_type','vendor','gstin','invoice_number','po_number','due_date','total','status','method','reasons']
+    rows = storage.list_runs(limit=10000)
+    def cell(value):
+        text = '; '.join(value or []) if isinstance(value, list) else str(value or '')
+        return '<c t="inlineStr"><is><t>{}</t></is></c>'.format(xml_escape(text))
+    sheet_rows = ['<row r="1">' + ''.join(cell(name.replace('_', ' ').title()) for name in fields) + '</row>']
+    for index, row in enumerate(rows, 2):
+        sheet_rows.append('<row r="{}">{}</row>'.format(index, ''.join(cell(row.get(name)) for name in fields)))
+    workbook = io.BytesIO()
+    with zipfile.ZipFile(workbook, 'w', zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+        archive.writestr('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        archive.writestr('xl/workbook.xml', '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Invoice records" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        archive.writestr('xl/_rels/workbook.xml.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+        archive.writestr('xl/worksheets/sheet1.xml', '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{}</sheetData></worksheet>'.format(''.join(sheet_rows)))
+    return Response(workbook.getvalue(), mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition':'attachment; filename="asa_invoice_records.xlsx"'})
+
 @app.post("/api/history/clear")
 def clear_history():
     count = storage.archive_history()
@@ -361,6 +383,22 @@ def review_api(rid):
         revised = decide(amended, ROOT / "samples" / "pos.csv", method="ocr", history_rows=history).__dict__
     storage.record_review(rid, reviewer, outcome, note, corrections, revised)
     return jsonify(saved=True, automated_decision=row["status"], revised_review_result=revised)
+
+@app.post('/api/runs/bulk-review')
+def bulk_review_api():
+    data = request.get_json(silent=True) or {}
+    run_ids = data.get('run_ids') or []
+    reviewer = str(data.get('reviewer') or '').strip()[:80]
+    outcome = data.get('outcome')
+    note = str(data.get('note') or '').strip()[:1000]
+    if not isinstance(run_ids, list) or not run_ids or len(run_ids) > 100 or not reviewer or outcome not in ('VERIFIED', 'NEEDS_CORRECTION') or (outcome == 'NEEDS_CORRECTION' and not note):
+        return jsonify(error='Select up to 100 runs, enter a reviewer, and provide a correction note when needed'), 400
+    saved = 0
+    for rid in set(str(item) for item in run_ids):
+        if storage.get_run(rid):
+            storage.record_review(rid, reviewer, outcome, note, {})
+            saved += 1
+    return jsonify(saved=saved, note='Review notes saved. Automated payment decisions remain unchanged.')
 
 @app.get("/")
 def index():
